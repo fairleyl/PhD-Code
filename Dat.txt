@@ -1,1 +1,1 @@
-Dat files are kept outside the repo
+Dat files are git-ignored
