@@ -201,109 +201,229 @@ function dcpIntBinToVar(x)
     return count
 end
 
-numRuns = 100
-N = 1000
-taus = []
-rels = []
-alphas = []
-cs = []
-Cs = []
-rs = []
-TAU_MAX = 1.0
-C0_MAX = 1.0
-R_MAX = 100.0
-maxCost = 10
-Random.seed!(12345)
-for i in 1:numRuns
-    tau = rand(N).*TAU_MAX 
-    push!(taus, tau)
+function dcpIntMinFailureConstrainedCost(probParams::problemParams, C, B)
+    (;N, alpha, tau, c, p, r) = probParams
+    ps = tau ./ (tau + alpha)
+    qs = 1 .- ps
+    upper = max.(floor.(B ./ C), 1)
+    set_optimizer_attribute(model, "OutputFlag", 0)
+    set_optimizer_attribute(model, "IntegralityFocus", 1)
+    #set_optimizer_attribute(model, "NumericFocus", 3)
+    #set_optimizer_attribute(model, "Quad", 1)
+    #set_optimizer_attribute(model, "FeasibilityTol", 1e-9)
+    #set_optimizer_attribute(model, "OptimalityTol", 1e-9)
+    #set_optimizer_attribute(model, "MarkowitzTol", 0.999)
 
-    rel = 0.9 .+ 0.1*rand(N)
-    push!(rels, rel)
+    @variable(model, x[1:N], Int)
 
-    alpha = tau .* ((1 ./ rel) .- 1)
-    push!(alphas, alpha)
+    @constraint(model, sum(C[i]*x[i] for i in 1:N) <= B)
 
-    c = rand(N).*C0_MAX
-    c = sort(c)
-    push!(cs, c)
+    @objective(model,
+    Min,
+    sum(log(qs[i])*x[i]) for i in 1:N)
 
-    r = 1 .+ rand(N).*(R_MAX - 1)
-    push!(rs, r)
+    optimize!(model)
 
-    C = sample([i for i in 1:maxCost], N)
-    push!(Cs, C)
+    return model, objective_value(model), x
 end
 
-named = "./Documents/GitHub/PhD-Code/dcpIntExp1-1000.dat"
-results = deserialize(named)
-taus = results["taus"]
-rels = results["rels"]
-alphas = results["alphas"]
-cs = results["cs"]
-Cs = results["Cs"]
-rs = results["rs"]
-beta = 1.0
 p = 0.0
+numRuns = 100
+maxCost = 10
 epsilon = 1.0e-1
-for N in [1000]
-    
-    #iterate over each random link set
-    for i in 87:numRuns
-        dcpsI = []
-        objValsI = []
-        logFailProbsI = []
-        minCostsI = []
-        termStatI = []
-        print("Run: ")
-        println(i)
+beta = 1.0
+newName = "./Documents/GitHub/PhD-Code/dcpIntExp2-"*string(N)*".dat"
 
-        #print("rel: ")
-        #println(round.(rels[i], digits = 5))
 
-        #print("c: ")
-        #println(round.(cs[i], digits = 5))
+for N in [5,10,50,100,500,1000]
+    print("N = ")
+    println(N)
 
-        #print("r: ")
-        #println(round.(rs[i], digits = 5))
+    #load previous file
+    oldName = "./Documents/GitHub/PhD-Code/dcpIntExp1-"*string(N)*".dat"
+    oldResults = deserialize(oldName)
+    taus = oldResults["taus"]    
+    alphas = oldResults["alphas"]
+    rels = oldResults["rels"]
+    cs = oldResults["cs"]
+    Cs = oldResults["Cs"]
+    rs = oldResults["rs"]
+    minCosts = oldResults["minCosts"]
 
-        probParams = problemParams(N = N, alpha = alphas[i], beta = beta, tau = taus[i], c = cs[i], p = p, r = rs[i])
-        
-        #solve for different log-fail constraints, down to a roughly 1/billion chance
-        #print("probLim: ")
-        for probLim in -1:-1:-21    
-            #print("Max log-failure probability: ")
-            print(probLim)     
+    #new field for runtimes
+    oldResults["time"] = []
+
+    #load constrained file
+    newName = "./Documents/GitHub/PhD-Code/dcpIntExp2-"*string(N)*".dat"
+    newResults = deserialize(newName)
+
+    #new field for runtimes
+    newResults["time"] = []
+
+    #Bs = newResults["Bs"]
+    for i in 1:numRuns
+        print(i)
+        print(", ")
+        tau = taus[i]
+        alpha = alphas[i]
+        c = cs[i]
+        r = rs[i]
+        C = Cs[i]
+        rel = rels[i]
+
+        probParams = problemParams(; N = N, alpha = alpha, beta = beta, tau = tau, c = c, p = p, r = r)
+        #objValsI = []
+        #dcpsI = []
+        #logFailProbsI = []
+        #termStatsI = []
+        #BsI = []
+        timeUncsI = []
+        timeConsI = []
+        for probLim in -1:-1:-21
+            prevCost = sum(C .* oldResults["dcps"][i][-probLim])
+            print(probLim)
             print(", ")
-            res = dcpIntConstrainedFailure(probParams; probLim = probLim, M = 1.0, C = 0.0, B = Inf, epsilon = epsilon, timeLimit = 60.0)
-            resCost = dcpIntMinCostConstrainedFailure(probParams, Cs[i], probLim)
+            #println(prevCost)
+            #println(minCosts[i][-probLim])
+            B = (prevCost + minCosts[i][-probLim])/2
+            #push!(BsI, B)
+            timeUnc = @elapsed dcpIntConstrainedFailure(probParams; probLim = probLim, M = 1.0, C = C, B = Inf, epsilon = epsilon, timeLimit = 60.0)
+            timeCon = @elapsed dcpIntConstrainedFailure(probParams; probLim = probLim, M = 1.0, C = C, B = B, epsilon = epsilon, timeLimit = 60.0)
+            #print(solution_summary(res[1]))
+            #model = res[1]
+            #objVal = res[2]
+            #logFailProb = res[3]
+            #x = res[4]
+            #termStat = termination_status(res[1])
 
-            model = res[1]
-            objVal = res[2]
-            logFailProb = res[3]
-            x = res[4]
-            termStat = termination_status(res[1])
-            minCost = resCost[2]
+            #push!(objValsI, objVal)
+            #push!(logFailProbsI, logFailProb)
 
-            #println(solution_summary(model))
-            #print("Usage Costs: ")
-            #println(round(objVal, digits = 5))
-            push!(objValsI, objVal)
-
-            #print("Log Failure Probability: ")
-            #println(round(logFailProb, digits = 5))
-            push!(logFailProbsI, logFailProb)
-
-            push!(dcpsI, dcpIntBinToVar(x))
-            push!(minCostsI, minCost)
-            push!(termStatI, termStat)
+            #push!(dcpsI, dcpIntBinToVar(x))
+            #push!(termStatsI, termStat)
+            push!(timeUncsI, timeUnc)
+            push!(timeConsI, timeCon)
         end
         println()
-        push!(results["dcps"], dcpsI)
-        push!(results["objVals"], objValsI)
-        push!(results["logFailProbs"], logFailProbsI)
-        push!(results["minCosts"], minCostsI)
-        push!(results["termStats"], termStatI)
-        f = serialize(named, results)
+
+        #push!(newResults["dcps"], dcpsI)
+        #push!(newResults["objVals"], objValsI)
+        #push!(newResults["logFailProbs"], logFailProbsI)
+        #push!(newResults["termStats"], termStatsI)
+        #push!(newResults["Bs"], BsI)
+        push!(oldResults["time"], timeUncsI)
+        push!(newResults["time"], timeConsI)
+        f = serialize(oldName, oldResults)
+        f = serialize(newName, newResults)
     end
+    println()
 end
+
+N = 5
+newName = "./Documents/GitHub/PhD-Code/dcpIntExp2-"*string(N)*".dat"
+newResults = deserialize(newName)
+dcps = newResults["dcps"]
+run = 3
+l = [(i,dcps[run][21][i]) for i in 1:N if dcps[run][21][i] > 0]
+
+variety = []
+for i in 1:100
+    varI = []
+    for j in 1:21
+        usedComps = [(k,dcps[i][j][k]) for k in 1:N if dcps[i][j][k] > 0]
+        push!(varI, length(usedComps))
+    end
+    push!(variety, varI)
+end
+
+variety
+
+plots = []
+for N in [5,10,50,100,500,1000]
+    newName = "./Documents/GitHub/PhD-Code/dcpIntExp1-"*string(N)*".dat"
+    newResults = deserialize(newName)
+    time = newResults["time"]N = 500
+    newName = "./Documents/GitHub/PhD-Code/dcpIntExp1-"*string(N)*".dat"
+    newResults = deserialize(newName)
+    dcps = newResults["dcps"]
+    run = 3
+    l = [(i,dcps[run][21][i]) for i in 1:100 if dcps[run][21][i] > 0]
+    
+    variety = []
+    for i in 1:100
+        varI = []
+        for j in 1:21
+            usedComps = [(k,dcps[i][j][k]) for k in 1:N if dcps[i][j][k] > 0]
+            push!(varI, length(usedComps))
+        end
+        push!(variety, varI)
+    end
+    
+    variety
+    p = StatsPlots.plot(time[1])
+    for i in 2:100
+        StatsPlots.plot!(p, time[i])
+    end
+    push!(plots, p)
+end
+
+varietiesUnc = []
+varietiesCon = []
+for N in [5,10,50,100,500,1000]
+    oldName = "./Documents/GitHub/PhD-Code/dcpIntExp1-"*string(N)*".dat"
+    newName = "./Documents/GitHub/PhD-Code/dcpIntExp2-"*string(N)*".dat"
+    oldResults = deserialize(oldName)
+    newResults = deserialize(newName)
+    oldDcps = oldResults["dcps"]
+    newDcps = newResults["dcps"]
+
+    varietyUncN = []
+    varietyConN = []
+    for i in 1:100
+        varUncI = []
+        varConI = []
+        for j in 1:21
+            usedCompsUnc = [(k,oldDcps[i][j][k]) for k in 1:N if oldDcps[i][j][k] > 0]
+            usedCompsCon = [(k,newDcps[i][j][k]) for k in 1:N if newDcps[i][j][k] > 0]
+            push!(varUncI, length(usedCompsUnc))
+            push!(varConI, length(usedCompsCon))
+        end
+        push!(varietyUncN, varUncI)
+        push!(varietyConN, varConI)
+    end
+    push!(varietiesUnc, varietyUncN)
+    push!(varietiesCon, varietyConN)
+end
+
+#link sets from literature
+taus = [fill(1.0,4),
+        fill(1.0,3),
+        fill(1.0,4),
+        fill(1.0,3),
+        fill(1.0,3),
+        fill(1.0,4),
+        fill(1.0,3),
+        fill(1.0,3),
+        fill(1.0,4),
+        fill(1.0,3),
+        fill(1.0,3),
+        fill(1.0,4),
+        fill(1.0,3),
+        fill(1.0,4)]
+ps = [[0.9,0.93,0.91,0.95],
+    [0.95,0.94,0.93],
+    [0.85,0.9,0.87,0.92],
+    [0.93,0.87,0.85],
+    [0.94,0.93,0.95],
+    [0.99,0.98,0.97,0.96],
+    [0.91,0.92,0.94],
+    [0.81,0.90,0.91],
+    [0.97,0.99,0.96,0.91],
+    [0.83,0.85,0.9],
+    [0.94,0.95,0.96],
+    [0.79,0.82,0.85,0.9],
+    [0.98,0.99,0.97],
+    [0.9,0.92,0.95,0.99]]
+alphas = [1.0 ./ ps[i] .- 1.0 for i in 1:14]
+#Cs = [...]
+#Ws = [...]
