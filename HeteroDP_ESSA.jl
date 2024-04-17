@@ -43,6 +43,10 @@ addprocs(4)
 
     function repCartesianProduct(A; C = 0, B = Inf)
         N = length(A)
+        if N == 1
+            return [[a] for a in A[1]]
+        end
+
         subProds = [cartProd(A[1],A[2])]
         for i in 1:(N - 2)
             newSubProds = cartProd(subProds[i], A[i+2])
@@ -72,6 +76,7 @@ addprocs(4)
 
     function enumerateStatesESSA(A)
         B = [enumerateStatesHomog(A[i]) for i in 1:length(A)]
+
         return repCartesianProduct(B)
     end
 
@@ -707,6 +712,52 @@ function dcpIntMinFailureConstrainedCost(probParams::problemParams, C, B; w = 0.
     return model, objective_value(model), x
 end
 
+function dcpCostRate(probParams, x)
+    (;N,alpha,tau,c,r) = probParams
+    qs = alpha ./ (alpha .+ tau)
+    return sum(r[i]*qs[i]*x[i] for i in 1:N) + c[1]*(1 - qs[1]^x[1]) + sum( c[i]*prod(qs[j]^x[j] for j in 1:(i - 1))*(1 - qs[i]^x[i]) for i in 2:N)
+end
+
+#input list of unique designs (copies should already be filtered)
+function eliminateDominatedDesigns(designs)
+    nonDom = []
+    for d in designs
+        dom = false
+        for dComp in designs
+            if prod((dComp .- d) .>= 0) && d != dComp
+                dom = true
+                break
+            end
+        end
+        if !dom
+            push!(nonDom, d)
+        end
+    end
+
+    return nonDom
+end
+
+function maskProblemParams(probParams, design)
+    (; N, alpha, beta, tau, c, p, r) = probParams
+
+    alphaNew = []
+    tauNew = []
+    cNew = []
+    rNew = []
+
+    for i in 1:N
+        if design[i] >= 1
+            push!(alphaNew,alpha[i])
+            push!(tauNew, tau[i])
+            push!(cNew, c[i])
+            push!(rNew, r[i])
+        end
+    end
+
+    return problemParams(length(alphaNew), beta, alphaNew, tauNew, cNew, rNew, p)
+end
+
+
 @everywhere oldName = "./Documents/GitHub/PhD-Code/dcpIntExp1-10.dat"
 @everywhere results = deserialize(oldName)
 print(keys(results))
@@ -1100,40 +1151,25 @@ StatsPlots.savefig("../fairleyl/Documents/GitHub/PhD-Code/PFront3.pdf")
             # add to plot and save 
         # eliminate dominated solutions and re-plot
 
-function dcpCostRate(probParams, x)
-    (;N,alpha,tau,c,r) = probParams
-    qs = alpha ./ (alpha .+ tau)
-    return sum(r[i]*qs[i]*x[i] for i in 1:N) + c[1]*(1 - qs[1]^x[1]) + sum( c[i]*prod(qs[j]^x[j] for j in 1:(i - 1))*(1 - qs[i]^x[i]) for i in 2:N)
-end
 
-#input list of unique designs (copies should already be filtered)
-function eliminateDominatedDesigns(designs)
-    nonDom = []
-    for d in designs
-        dom = false
-        for dComp in designs
-            if prod((dComp .- d) .>= 0) && d != dComp
-                dom = true
-                break
-            end
-        end
-        if !dom
-            push!(nonDom, d)
-        end
-    end
-
-    return nonDom
-end
-
+staticDesignDict = Dict()
+staticObjValDict = Dict()
+staticLFRDict = Dict()
+dynamicDesignDict = Dict()
+dynamicObjValDict = Dict()
+dynamicLFRDict = Dict()
 
 #for every component set
 for i in 1:14
+    println("Problem Set: "*string(i))
     probParams = probParamses[i]
+    println(probParams)
     C = Cs[i]
     w = ws[i]
 
     #for each constraint pair
     for j in 1:5
+        println("Constraint Set: "*string(j))
         B = Bs[i][j]
         W = Ws[i][j]
 
@@ -1168,6 +1204,10 @@ for i in 1:14
             end
         end
 
+        staticDesignDict[[i,j]] = designs
+        staticObjValDict[[i,j]] = objVals
+        staticLFRDict[[i,j]] = logFailRates
+
         #plot solutions so far
         StatsPlots.plot(objVals, logFailRates, seriestype=:scatter, label = "Designs", markersize = 7)
         xlabel!("Operational Cost")
@@ -1178,6 +1218,81 @@ for i in 1:14
 
 
         #eliminate dominated designs
+        dynamicDesigns = eliminateDominatedDesigns(designs)
+        dynamicObjVals = []
+        dynamicLogFailRates = []
+
+        println("Number of Dynamic Designs: "*string(length(dynamicDesigns)))
+        count = 1
+        for design in dynamicDesigns
+            println("Design: "*string(design))
+            
+            probParamsD = maskProblemParams(probParams, design)
+            #println(probParamsD)
+            designMasked = []
+            
+            for d in design
+                if d >= 1
+                    push!(designMasked, d)
+                end
+            end
+
+            highLogFailRate = 0.0
+            faLogFailRate = 0.0
+            for k in 1:length(designs)
+                if design == designs[k]
+                    faLogFailRate = logFailRates[k]
+                    break
+                end
+            end
+
+            objValsD = []
+            logFailRatesD = []
+            probParamsD.p = 1.0
+            pScale = 10.0
+            println("Min LFR: "*string(faLogFailRate))
+
+            while abs((exp(highLogFailRate) - exp(faLogFailRate))/exp(faLogFailRate)) >= 0.01
+                probParamsD.p = probParamsD.p*pScale
+                println("p: "*string(probParamsD.p))
+                epsilon = min(probParamsD.p*exp(faLogFailRate)/100.0, 0.00001)
+                test = rviESSA(probParamsD, designMasked, epsilon, nMax = 10000, delScale = 1, printProgress = true, modCounter = 1000, actionType = "las2")
+                println("RVI Complete")
+                test = rpiESSA(probParamsD, designMasked, test[2], epsilon)
+                println("PI Complete")
+
+                #println(js[i])
+                println("OpCost: "*string(test[1][1]))
+                push!(objValsD,test[1][1])
+                
+                println("LFR: "*string(log(test[1][2]/probParamsD.p)))
+                push!(logFailRatesD, log(test[1][2]/probParamsD.p))
+                highLogFailRate = log(test[1][2]/probParamsD.p)
+                println()
+            end
+
+            push!(dynamicObjVals, objValsD)
+            push!(dynamicLogFailRates, logFailRatesD)
+
+            StatsPlots.plot!(objValsD, logFailRatesD, seriestype=:scatter, label = "Dynamic (Design "*string(count)*")")
+            StatsPlots.savefig(title * "_" * string(count) * ".pdf")
+
+            count = count + 1
+        end
+
+        dynamicDesignDict[[i,j]] = dynamicDesigns
+        dynamicObjValDict[[i,j]] = dynamicObjVals
+        dynamicLFRDict[[i,j]] = dynamicLogFailRates
+
+        out = Dict()
+        out["sDesign"] = staticDesignDict
+        out["sObj"] = staticObjValDict
+        out["sLFR"] = staticLFRDict
+        out["dDesign"] = dynamicDesignDict
+        out["dObj"] = dynamicObjValDict
+        out["dLFR"] = dynamicLFRDict
+
+        f = serialize("../fairleyl/Documents/GitHub/PhD-Code/17AprExp.dat", out)
     end
 end
 
