@@ -1296,7 +1296,43 @@ for i in 1:14
     end
 end
 
+dynamicDesignDict[[5,1]]
+pair = [3,1]
+StatsPlots.plot(staticObjValDict[pair], staticLFRDict[pair], seriestype=:scatter, label = "Designs", markersize = 7)
+xlabel!("Operational Cost")
+ylabel!("log-failure-rate")
+StatsPlots.savefig("../fairleyl/Documents/GitHub/PhD-Code/nicePlot_" * string(pair) * "0.pdf")
 
+for i in 1:length(dynamicObjValDict[pair])
+    markersize = fill(4, length(dynamicObjValDict[pair][i]))
+    markersize[length(markersize)] = 7
+    StatsPlots.plot!(dynamicObjValDict[pair][i],dynamicLFRDict[pair][i], seriestype=:scatter, label = "Dynamic (Design " * string(i) * ")", markersize = markersize)
+    StatsPlots.savefig("../fairleyl/Documents/GitHub/PhD-Code/nicePlot_" * string(pair) * string(i) * ".pdf")
+end
 
+allObjVals = deepcopy(staticObjValDict[pair])
+allLFRs = deepcopy(staticLFRDict[pair])
+for i in 1:length(dynamicObjValDict[pair])
+    append!(allObjVals, dynamicObjValDict[pair][i])
+    append!(allLFRs, dynamicLFRDict[pair][i])
+end
 
+nonDomOJs = []
+nonDomLFRs = []
+for i in 1:length(allObjVals)
+    dom = false
+    for j in 1:length(allObjVals)
+        if i != j && allObjVals[i] >= allObjVals[j] && allLFRs[i] >= allLFRs[j]
+            dom = true
+            break
+        end
+    end
+    if !dom
+        push!(nonDomOJs, allObjVals[i])
+        push!(nonDomLFRs, allLFRs[i])
+    end
+end
 
+p = sortperm(nonDomOJs)
+StatsPlots.plot!(nonDomOJs[p], nonDomLFRs[p], colour = :red, label = "Pareto-front")
+StatsPlots.savefig("../fairleyl/Documents/GitHub/PhD-Code/nicePlot" * string(pair) * "_front.pdf")
