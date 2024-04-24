@@ -1,6 +1,6 @@
 println("Start")
 using Distributed
-addprocs(4)
+addprocs(1)
 
 @everywhere println("Start")
 
@@ -616,6 +616,8 @@ function dcpIntConstrainedFailure(probParams::problemParams; probLim = 0.0, M = 
     end
 end
 
+
+
 function dcpIntMinCostConstrainedFailure(probParams::problemParams, C, probLim)
     (;N, alpha, tau, c, p, r) = probParams
     ps = tau ./ (tau + alpha)
@@ -712,12 +714,188 @@ function dcpIntMinFailureConstrainedCost(probParams::problemParams, C, B; w = 0.
     return model, objective_value(model), x
 end
 
+function neighbourhood(s)
+    neighbourhood = []
+    N = length(s)
+    for i in 1:N
+        sRepSucc = copy(s)
+        sRepFail = copy(s)
+        sDeg = copy(s)
+        sRepSucc[i] = sRepSucc[i] .+ [0,-1]
+        sRepFail[i] = sRepFail[i] .+ [1,-1]
+        sDeg[i] = sDeg[i] .+ [1,0]
+        append!(neighbourhood, [sRepSucc, sRepFail, sDeg])
+    end
+
+    return neighbourhood
+end 
+
+function q(probParams, D)
+    #STUFF
+    (;N, alpha, tau, c, p, r) = probParams
+    q = Dict()
+    stateSpace = enumerateStatesESSA(D)
+    for s in stateSpace
+        actionSpace = enumerateFeasibleActionsESSA(s)
+        for a in actionSpace
+            sPost = postActionState(s,a)
+            nHood = neighbourhood(sPost)
+            for sPrime in stateSpace
+                q[s,a,sPrime] = 0.0
+            end
+
+            total = 0.0
+            for i in 1:N
+                sRepSucc = copy(sPost)
+                sRepFail = copy(sPost)
+                sDeg = copy(sPost)
+                sRepSucc[i] = sRepSucc[i] .+ [-1,0]
+                sRepFail[i] = sRepFail[i] .+ [-1,1]
+                sDeg[i] = sDeg[i] .+ [0,1]
+
+                q[s,a,sRepSucc] = tau[i]*sPost[i][1]
+                q[s,a,sRepFail] = alpha[i]*sPost[i][1]
+                q[s,a,sDeg] = (D[i] - sum(sPost[i]))*alpha[i]
+
+                total += (tau[i] + alpha[i])*sPost[i][1] + (D[i] - sum(sPost[i]))*alpha[i]
+            end
+
+            q[s,a,s] = -total
+        end
+    end 
+    return q
+end
+
+probParams = problemParams(2, 1.0, [0.1,0.2], [1.0, 1.0], [2.0,1.0], [100.0, 50.0], 1000.0)
+
+function mdpDesignLP(probParams::problemParams, C, B, w, W; minProb = 0.0, speak = false)
+    #Get component parameters
+    (;N, alpha, tau, c, p, r) = probParams
+
+    #Find maximum mumber of each component according to constraints
+    upper = max.(min.(floor.(B ./ C), floor.(W ./ w)), 1)
+
+    #start LP model and set attributes
+    model = direct_model(Gurobi.Optimizer(GRB_ENV))
+    set_optimizer_attribute(model, "OutputFlag", 0)
+    set_optimizer_attribute(model, "IntegralityFocus", 1)
+    set_optimizer_attribute(model, "NumericFocus", 3)
+    set_optimizer_attribute(model, "Quad", 1)
+    set_optimizer_attribute(model, "FeasibilityTol", 1e-9)
+    set_optimizer_attribute(model, "OptimalityTol", 1e-9)
+    set_optimizer_attribute(model, "MarkowitzTol", 0.999)
+
+    #find maximum state space and state-action space, ignoring null action in worst state
+    stateSpace = enumerateStatesESSA(upper)
+    stateActionSpace = []
+    for s in stateSpace
+        actionSpace = enumerateFeasibleActionsESSA(s)
+        for a in actionSpace
+            #if sum(s[i][2] for i in 1:N) < sum(upper) || a != fill(0, N)
+            push!(stateActionSpace, [s, a])
+            #end
+        end
+    end
+
+    if speak
+        println("State-Action Space Constructed")
+        print(length(stateActionSpace))
+        println(" variables")
+    end
+
+    # sasHealth = []
+    # for sa in stateActionSpace
+    #     s = sa[1]
+    #     for i in 1:N
+    #         if upper[i] - s[i][2] > 0
+    #             push!(sasHealth, sa)
+    #             break
+    #         end
+    #     end
+    # end
+
+
+    #define state-action frequency and binary design variables 
+    indices = [(i,j) for i in 1:N for j in 1:upper[i]]
+    @variable(model, f[stateActionSpace] >= 0, start = 0.0)
+    @variable(model, x[indices], Bin, start = 0)
+    #@variable(model, x[indices] >= 0, start = 0.0) #linear relaxation
+
+    #starting solution (install and repair one copy of component 1)
+    # sFail = [[0, upper[i]] for i in 1:N]
+    # aFail = fill(0, N)
+    # aFail[1] = 1
+    # set_start_value(x[(1,1)], 1.0)
+    # set_start_value(f[[sFail,aFail]], alpha[1]/(tau[1] + alpha[1]))
+    # set_start_value(f[[postActionState(sFail,aFail),fill(0, N)]], tau[1]/(tau[1] + alpha[1]))
+
+    #construct matrix of infinitesimal generator and instant costs
+    qMatrix = q(probParams, upper)
+    cMatrix = Dict()
+    for sa in stateActionSpace
+        cMatrix[sa] = costRateESSA(sa[1],sa[2],probParams, upper)
+    end
+
+    if speak
+        println("q and c matricies loaded")
+    end
+    
+    #for each state, add equilibrium constraint (ignoring null action for worst state)
+    # for s in stateSpace
+    #     actionSpace = enumerateFeasibleActionsESSA(s)
+    #     if sum(s[i][2] for i in 1:N) == sum(upper)
+    #         big = length(actionSpace)
+    #         actionSpace = actionSpace[2:big]
+    #     end
+        
+    #     @constraint(model, sum(qMatrix[s,a,s]*f[[s,a]] for a in actionSpace) + sum(qMatrix[s,a,sPrime]*f[[s,a]] for a in actionSpace for sPrime in neighbourhood(postActionState(s,a))) == 0.0)
+    # end
+
+    for sPrime in stateSpace
+        @constraint(model, sum(qMatrix[sa[1],sa[2],sPrime]*f[sa] for sa in stateActionSpace) == 0)
+    end
+    
+    #probabilities sum to one
+    @constraint(model, sum(f[sa] for sa in stateActionSpace) == 1.0)
+
+    #@constraint(model, sum(f[sa] for sa in sasHealth) >= minProb)
+
+    #ensure freqs are 0, ie states are inaccessible, if a corresponding component is not installed   
+    for i in 1:N
+        for j in 1:upper[i]
+            @constraint(model, sum(f[sa] for sa in stateActionSpace if upper[i] - sa[1][i][2] >= j) <= x[(i,j)])
+        end
+    end
+
+    #cost and weight constraints
+    @constraint(model, sum(C[i]*x[(i,j)] for i in 1:N for j in 1:upper[i]) <= B)
+    @constraint(model, sum(w[i]*x[(i,j)] for i in 1:N for j in 1:upper[i]) <= W)
+
+    #symmetry breaking constraints
+    for i in 1:N
+        for j in 1:(upper[i] - 1)
+            @constraint(model, x[(i,j)] >= x[(i,j + 1)])
+        end
+    end
+
+    @objective(model,
+    Min,
+    sum(sum(cMatrix[sa])*f[sa] for sa in stateActionSpace))
+
+    optimize!(model)
+
+    opCost = sum(cMatrix[sa][1]*value(f[sa]) for sa in stateActionSpace)
+    reliability = sum(cMatrix[sa][2]*value(f[sa]) for sa in stateActionSpace)/p
+    return model, opCost, reliability , f, x
+end
+
 function dcpCostRate(probParams, x)
     (;N,alpha,tau,c,r) = probParams
     qs = alpha ./ (alpha .+ tau)
     return sum(r[i]*qs[i]*x[i] for i in 1:N) + c[1]*(1 - qs[1]^x[1]) + sum( c[i]*prod(qs[j]^x[j] for j in 1:(i - 1))*(1 - qs[i]^x[i]) for i in 2:N)
 end
 
+Gurobi._is_feasible
 #input list of unique designs (copies should already be filtered)
 function eliminateDominatedDesigns(designs)
     nonDom = []
