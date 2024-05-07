@@ -1,6 +1,6 @@
 println("Start")
 using Distributed
-addprocs(1)
+#addprocs(1)
 
 @everywhere println("Start")
 
@@ -739,25 +739,26 @@ function q(probParams, D)
         actionSpace = enumerateFeasibleActionsESSA(s)
         for a in actionSpace
             sPost = postActionState(s,a)
-            nHood = neighbourhood(sPost)
+            #nHood = neighbourhood(sPost)
             for sPrime in stateSpace
                 q[s,a,sPrime] = 0.0
             end
 
             total = 0.0
             for i in 1:N
-                sRepSucc = copy(sPost)
-                sRepFail = copy(sPost)
-                sDeg = copy(sPost)
+                sRepSucc = deepcopy(sPost)
+                sRepFail = deepcopy(sPost)
+                sDeg = deepcopy(sPost)
                 sRepSucc[i] = sRepSucc[i] .+ [-1,0]
                 sRepFail[i] = sRepFail[i] .+ [-1,1]
                 sDeg[i] = sDeg[i] .+ [0,1]
 
+                sDiff = (s != sRepFail)
                 q[s,a,sRepSucc] = tau[i]*sPost[i][1]
-                q[s,a,sRepFail] = alpha[i]*sPost[i][1]
+                q[s,a,sRepFail] = sDiff*alpha[i]*sPost[i][1]
                 q[s,a,sDeg] = (D[i] - sum(sPost[i]))*alpha[i]
 
-                total += (tau[i] + alpha[i])*sPost[i][1] + (D[i] - sum(sPost[i]))*alpha[i]
+                total += (tau[i] + sDiff*alpha[i])*sPost[i][1] + (D[i] - sum(sPost[i]))*alpha[i]
             end
 
             q[s,a,s] = -total
@@ -766,9 +767,90 @@ function q(probParams, D)
     return q
 end
 
+function q2(probParams, D; goalTime = Inf)
+    #STUFF
+    if time() > goalTime 
+        return Dict()
+    end
+
+    (;N, alpha, tau, c, p, r) = probParams
+    q = Dict()
+    stateSpace = enumerateStatesESSA(D)
+    for s in stateSpace
+        actionSpace = enumerateFeasibleActionsESSA(s)
+        for a in actionSpace
+            sPost = postActionState(s,a)
+            nHood = neighbourhood(sPost)
+            for sPrime in nHood
+                q[s,a,sPrime] = 0.0
+            end
+
+            total = 0.0
+            for i in 1:N
+                sRepSucc = deepcopy(sPost)
+                sRepFail = deepcopy(sPost)
+                sDeg = deepcopy(sPost)
+                sRepSucc[i] = sRepSucc[i] .+ [-1,0]
+                sRepFail[i] = sRepFail[i] .+ [-1,1]
+                sDeg[i] = sDeg[i] .+ [0,1]
+
+                sDiff = (s != sRepFail)
+                q[s,a,sRepSucc] = tau[i]*sPost[i][1]
+                q[s,a,sRepFail] = sDiff*alpha[i]*sPost[i][1]
+                q[s,a,sDeg] = (D[i] - sum(sPost[i]))*alpha[i]
+
+                total += (tau[i] + sDiff*alpha[i])*sPost[i][1] + (D[i] - sum(sPost[i]))*alpha[i]
+            end
+
+            q[s,a,s] = -total
+            if time() >= goalTime
+                return q
+            end
+        end    
+    end 
+    return q
+end
+
+function reverseNeighbourhood(s, D)
+    N = length(s)
+    postStateHood = []
+    saHood = []
+    for i in 1:N
+        #repair success
+        if D[i] - s[i][1] - s[i][2] > 0
+            sPost = deepcopy(s)
+            sPost[i][1] += 1
+            push!(postStateHood, sPost)
+        end
+        #repair fail or new degradation
+        if s[i][2] > 0
+            sPost1 = deepcopy(s)
+            sPost2 = deepcopy(s)
+            sPost1[i] .+= [1,-1]
+            sPost2[i] .+= [0,-1]
+            append!(postStateHood, [sPost1, sPost2])
+        end 
+    end
+    for sPost in postStateHood
+        auxState = [[0,sPost[i][1]] for i in 1:N]
+        actionSpace = enumerateFeasibleActionsESSA(auxState)
+        for a in actionSpace
+            sPre = deepcopy(sPost)
+            for i in 1:N
+                sPre[i] += a[i].*[-1,1]
+            end
+            if sPre != s
+                push!(saHood, [sPre, a])
+            end
+        end
+    end
+
+    return saHood
+end
+
 probParams = problemParams(2, 1.0, [0.1,0.2], [1.0, 1.0], [2.0,1.0], [100.0, 50.0], 1000.0)
 
-function mdpDesignLP(probParams::problemParams, C, B, w, W; minProb = 0.0, speak = false)
+function mdpDesignLP(probParams::problemParams, C, B, w, W; minProb = 0.0, speak = false, careful = true)
     #Get component parameters
     (;N, alpha, tau, c, p, r) = probParams
 
@@ -778,12 +860,14 @@ function mdpDesignLP(probParams::problemParams, C, B, w, W; minProb = 0.0, speak
     #start LP model and set attributes
     model = direct_model(Gurobi.Optimizer(GRB_ENV))
     set_optimizer_attribute(model, "OutputFlag", 0)
-    set_optimizer_attribute(model, "IntegralityFocus", 1)
-    set_optimizer_attribute(model, "NumericFocus", 3)
-    set_optimizer_attribute(model, "Quad", 1)
-    set_optimizer_attribute(model, "FeasibilityTol", 1e-9)
-    set_optimizer_attribute(model, "OptimalityTol", 1e-9)
-    set_optimizer_attribute(model, "MarkowitzTol", 0.999)
+    if careful
+        set_optimizer_attribute(model, "IntegralityFocus", 1)
+        set_optimizer_attribute(model, "NumericFocus", 3)
+        set_optimizer_attribute(model, "Quad", 1)
+        set_optimizer_attribute(model, "FeasibilityTol", 1e-9)
+        set_optimizer_attribute(model, "OptimalityTol", 1e-9)
+        set_optimizer_attribute(model, "MarkowitzTol", 0.999)
+    end
 
     #find maximum state space and state-action space, ignoring null action in worst state
     stateSpace = enumerateStatesESSA(upper)
@@ -830,7 +914,7 @@ function mdpDesignLP(probParams::problemParams, C, B, w, W; minProb = 0.0, speak
     # set_start_value(f[[postActionState(sFail,aFail),fill(0, N)]], tau[1]/(tau[1] + alpha[1]))
 
     #construct matrix of infinitesimal generator and instant costs
-    qMatrix = q(probParams, upper)
+    qMatrix = q2(probParams, upper)
     cMatrix = Dict()
     for sa in stateActionSpace
         cMatrix[sa] = costRateESSA(sa[1],sa[2],probParams, upper)
@@ -839,7 +923,7 @@ function mdpDesignLP(probParams::problemParams, C, B, w, W; minProb = 0.0, speak
     if speak
         println("q and c matricies loaded")
     end
-    
+
     #for each state, add equilibrium constraint (ignoring null action for worst state)
     # for s in stateSpace
     #     actionSpace = enumerateFeasibleActionsESSA(s)
@@ -852,9 +936,13 @@ function mdpDesignLP(probParams::problemParams, C, B, w, W; minProb = 0.0, speak
     # end
 
     for sPrime in stateSpace
-        @constraint(model, sum(qMatrix[sa[1],sa[2],sPrime]*f[sa] for sa in stateActionSpace) == 0)
+        feasStateActionSpace = reverseNeighbourhood(sPrime, upper)
+        feasActionSpace = enumerateFeasibleActionsESSA(sPrime)
+        #@constraint(model, sum(qMatrix[sa[1],sa[2],sPrime]*f[sa] for sa in stateActionSpace) == 0)
+        @constraint(model, sum(qMatrix[sPrime,a,sPrime]*f[[sPrime,a]] for a in feasActionSpace) + sum(qMatrix[sa[1],sa[2],sPrime]*f[sa] for sa in feasStateActionSpace) == 0)
     end
     
+
     #probabilities sum to one
     @constraint(model, sum(f[sa] for sa in stateActionSpace) == 1.0)
 
@@ -878,6 +966,10 @@ function mdpDesignLP(probParams::problemParams, C, B, w, W; minProb = 0.0, speak
         end
     end
 
+    if speak
+        println("Constraints Loaded")
+    end
+
     @objective(model,
     Min,
     sum(sum(cMatrix[sa])*f[sa] for sa in stateActionSpace))
@@ -887,6 +979,160 @@ function mdpDesignLP(probParams::problemParams, C, B, w, W; minProb = 0.0, speak
     opCost = sum(cMatrix[sa][1]*value(f[sa]) for sa in stateActionSpace)
     reliability = sum(cMatrix[sa][2]*value(f[sa]) for sa in stateActionSpace)/p
     return model, opCost, reliability , f, x
+end
+
+function mdpDesignLP_MultiP(probParams::problemParams, C, B, w, W, ps; speak = false, careful = true, timeLimit = Inf, memLim = 12)
+    goalTime = Inf
+    if timeLimit < Inf
+        goalTime = time() + timeLimit
+    end
+
+    #Get component parameters
+    (;N, alpha, tau, c, p, r) = probParams
+    thisProbParams = copy(probParams)
+    thisProbParams.p = 1.0
+
+    #Find maximum mumber of each component according to constraints
+    upper = max.(min.(floor.(B ./ C), floor.(W ./ w)), 1)
+
+    #start LP model and set attributes
+    model = direct_model(Gurobi.Optimizer(GRB_ENV))
+    set_optimizer_attribute(model, "OutputFlag", 0)
+    if careful
+        set_optimizer_attribute(model, "IntegralityFocus", 1)
+        set_optimizer_attribute(model, "NumericFocus", 3)
+        set_optimizer_attribute(model, "Quad", 1)
+        set_optimizer_attribute(model, "FeasibilityTol", 1e-9)
+        set_optimizer_attribute(model, "OptimalityTol", 1e-9)
+        set_optimizer_attribute(model, "MarkowitzTol", 0.999)
+    end
+
+    set_optimizer_attribute(model, "SoftMemLimit", memLim)
+    #find maximum state space and state-action space, ignoring null action in worst state
+    stateSpace = enumerateStatesESSA(upper)
+    stateActionSpace = []
+    for s in stateSpace
+        actionSpace = enumerateFeasibleActionsESSA(s)
+        for a in actionSpace
+            #if sum(s[i][2] for i in 1:N) < sum(upper) || a != fill(0, N)
+            push!(stateActionSpace, [s, a])
+            #end
+        end
+    end
+
+    if goalTime < time()
+        return "TimeOut", [], [],[]
+    end
+
+    if speak
+        println("State-Action Space Constructed")
+        print(length(stateActionSpace))
+        println(" variables")
+    end
+
+
+    #define state-action frequency and binary design variables 
+    indices = [(i,j) for i in 1:N for j in 1:upper[i]]
+    @variable(model, f[stateActionSpace] >= 0, start = 0.0)
+    @variable(model, x[indices], Bin, start = 0)
+    #@variable(model, x[indices] >= 0, start = 0.0) #linear relaxation
+
+    if goalTime < time()
+        return "TimeOut", [], [],[]
+    end
+
+    #construct matrix of infinitesimal generator and instant costs
+    qMatrix = q2(probParams, upper; goalTime = goalTime)
+
+    if goalTime < time()
+        return "TimeOut", [], [],[]
+    end
+
+    cMatrix = Dict()
+    for sa in stateActionSpace
+        cMatrix[sa] = costRateESSA(sa[1],sa[2],probParams, upper)
+    end
+
+    if goalTime < time()
+        return "TimeOut", [], [],[]
+    end
+
+    if speak
+        println("q and c matricies loaded")
+    end
+
+    for sPrime in stateSpace
+        feasStateActionSpace = reverseNeighbourhood(sPrime, upper)
+        feasActionSpace = enumerateFeasibleActionsESSA(sPrime)
+        #@constraint(model, sum(qMatrix[sa[1],sa[2],sPrime]*f[sa] for sa in stateActionSpace) == 0)
+        @constraint(model, sum(qMatrix[sPrime,a,sPrime]*f[[sPrime,a]] for a in feasActionSpace) + sum(qMatrix[sa[1],sa[2],sPrime]*f[sa] for sa in feasStateActionSpace) == 0)
+        if goalTime < time()
+            return "TimeOut", [], [],[]
+        end
+    end
+    
+
+    #probabilities sum to one
+    @constraint(model, sum(f[sa] for sa in stateActionSpace) == 1.0)
+
+    #ensure freqs are 0, ie states are inaccessible, if a corresponding component is not installed   
+    for i in 1:N
+        for j in 1:upper[i]
+            @constraint(model, sum(f[sa] for sa in stateActionSpace if upper[i] - sa[1][i][2] >= j) <= x[(i,j)])
+        end
+    end
+
+    #cost and weight constraints
+    @constraint(model, sum(C[i]*x[(i,j)] for i in 1:N for j in 1:upper[i]) <= B)
+    @constraint(model, sum(w[i]*x[(i,j)] for i in 1:N for j in 1:upper[i]) <= W)
+
+    #symmetry breaking constraints
+    for i in 1:N
+        for j in 1:(upper[i] - 1)
+            @constraint(model, x[(i,j)] >= x[(i,j + 1)])
+        end
+    end
+
+    if speak
+        println("Constraints Loaded")
+    end
+
+    opCosts = []
+    reliabilities = []
+    xs = []
+
+    for p in ps
+        if goalTime - time() < 0
+            return "TimeOut", opCosts, reliabilities, xs
+        end
+
+        @objective(model,
+        Min,
+        sum((cMatrix[sa][1] + p*cMatrix[sa][2])*f[sa] for sa in stateActionSpace))
+
+        if timeLimit < Inf
+            set_time_limit_sec(model, goalTime - time())
+        end
+
+        optimize!(model)
+
+        y = all_variables(model)
+        y_solution = value.(y)
+        set_start_value.(y, y_solution)
+
+        opCost = sum(cMatrix[sa][1]*value(f[sa]) for sa in stateActionSpace)
+        reliability = sum(cMatrix[sa][2]*value(f[sa]) for sa in stateActionSpace)/p
+
+        push!(opCosts, opCost)
+        push!(reliabilities, reliability)
+        try
+            push!(xs, value.(x))
+        catch err
+            break
+        end
+    end
+
+    return "Success", opCosts, reliabilities, xs
 end
 
 function dcpCostRate(probParams, x)
@@ -1316,6 +1562,7 @@ end
 StatsPlots.plot!(obj1_2, obj2_2, seriestype=:scatter, label = "Dynamic (Design 2)")
 StatsPlots.savefig("../fairleyl/Documents/GitHub/PhD-Code/PFront3.pdf")
 
+test = mdpDesignLP(probParams, Cs[1], 6, ws[1], ; speak = true)
 #for each link set i 
     #for constraints j 
         # maximise reliability
@@ -1514,3 +1761,455 @@ end
 p = sortperm(nonDomOJs)
 StatsPlots.plot!(nonDomOJs[p], nonDomLFRs[p], colour = :red, label = "Pareto-front")
 StatsPlots.savefig("../fairleyl/Documents/GitHub/PhD-Code/nicePlot" * string(pair) * "_front.pdf")
+
+################################
+#Small instances for LP testing#
+################################
+numReps = 30
+times = Dict()
+for B in 1:10
+    println("B="*string(B))
+    probParams = problemParams(N=4, beta = 1.0, alpha = alphas[1], tau = taus[1], c = cs[1], r = rs[1], p = 1.0)
+    C = Cs[1]
+    w = ws[1]
+    #B = 10
+    W = B
+
+    t = time()
+    #find maximum reliability
+    minFailRes = dcpIntMinFailureConstrainedCost(probParams, C, B, w = w, W = W)
+    minFailProb = minFailRes[2]
+
+    #save values
+    designs = [value.(minFailRes[3])]
+    objVals = [dcpCostRate(probParams, designs[1])]
+    logFailRates = [minFailProb]
+
+    #for range of target failure-rates
+    for k in 2:floor(abs(minFailProb))
+        #optimise for cost
+        res = dcpIntConstrainedFailure(probParams, probLim = -k, C = C, B = B, w = w, W = W)
+        thisDesign = dcpIntBinToVar(res[4])
+        
+        #if solution is new, save it
+        match = false
+        for d in designs
+            if d == thisDesign
+                match = true
+                break
+            end
+        end
+
+        if !match
+            push!(designs, thisDesign)
+            push!(objVals, res[2])
+            push!(logFailRates, res[3])
+        end
+    end
+
+    #staticDesignDict[[i,j]] = designs
+    #staticObjValDict[[i,j]] = objVals
+    #staticLFRDict[[i,j]] = logFailRates
+
+    #plot solutions so far
+    #StatsPlots.plot(objVals, logFailRates, seriestype=:scatter, label = "Designs", markersize = 7)
+    #xlabel!("Operational Cost")
+    #ylabel!("log-failure-rate")
+
+    #title = "../fairleyl/Documents/GitHub/PhD-Code/Pareto-fronts/Set" * string(i) * "Constraints" * string(j) 
+    #StatsPlots.savefig(title * "static.pdf")
+
+
+    #eliminate dominated designs
+    dynamicDesigns = eliminateDominatedDesigns(designs)
+    dynamicObjVals = []
+    dynamicLogFailRates = []
+
+    #println("Number of Dynamic Designs: "*string(length(dynamicDesigns)))
+    count = 1
+    maxP = 0.0
+    for design in dynamicDesigns
+        #println("Design: "*string(design))
+        
+        probParamsD = maskProblemParams(probParams, design)
+        #println(probParamsD)
+        designMasked = []
+        
+        for d in design
+            if d >= 1
+                push!(designMasked, d)
+            end
+        end
+
+        highLogFailRate = 0.0
+        faLogFailRate = 0.0
+        for k in 1:length(designs)
+            if design == designs[k]
+                faLogFailRate = logFailRates[k]
+                break
+            end
+        end
+
+        objValsD = []
+        logFailRatesD = []
+        probParamsD.p = 1.0
+        pScale = 10.0^(1/2)
+        #println("Min LFR: "*string(faLogFailRate))
+
+        while abs((exp(highLogFailRate) - exp(faLogFailRate))/exp(faLogFailRate)) >= 0.01
+            probParamsD.p = probParamsD.p*pScale
+            if maxP < probParamsD.p 
+                maxP = probParamsD.p 
+            end
+
+            #println("p: "*string(probParamsD.p))
+            epsilon = min(probParamsD.p*exp(faLogFailRate)/100.0, 0.00001)
+            test = rviESSA(probParamsD, designMasked, epsilon, nMax = 10000, delScale = 1, printProgress = false, modCounter = 1000, actionType = "las2")
+            #println("RVI Complete")
+            test = rpiESSA(probParamsD, designMasked, test[2], epsilon)
+            #println("PI Complete")
+
+            #println(js[i])
+            #println("OpCost: "*string(test[1][1]))
+            push!(objValsD,test[1][1])
+            
+            #println("LFR: "*string(log(test[1][2]/probParamsD.p)))
+            push!(logFailRatesD, log(test[1][2]/probParamsD.p))
+            highLogFailRate = log(test[1][2]/probParamsD.p)
+            
+        end
+        #println(probParamsD.p)
+        #println()
+        push!(dynamicObjVals, objValsD)
+        push!(dynamicLogFailRates, logFailRatesD)
+
+        #StatsPlots.plot!(objValsD, logFailRatesD, seriestype=:scatter, label = "Dynamic (Design "*string(count)*")")
+        #StatsPlots.savefig(title * "_" * string(count) * ".pdf")
+
+        count = count + 1
+    end
+
+    heuristicTime = time() - t 
+
+    #StatsPlots.plot!()
+
+    LPstartT = time()
+    obj1_LP = []
+    obj2_LP = []
+    js = [i/2 for i in 1:2*ceil(log10(maxP))]
+    ps = [10.0^js[i] for i in 1:length(js)]
+    test = mdpDesignLP_MultiP(probParams, C, B, w, W, ps; speak = false, careful = false, timeLimit = 70)
+    # for i in 1:length(js)
+    #     p = 10.0^js[i]
+    #     probParams = problemParams(; N = 4, alpha = alphas[1], beta = 1.0, tau = taus[1], c = cs[1], p = p, r = rs[1]) 
+    #     test = mdpDesignLP(probParams, C, B, w, W; speak = false, careful = false)
+    #     push!(obj1_LP, test[2])
+    #     push!(obj2_LP, log(test[3]))
+    # end
+
+    LPTime = time() - LPstartT
+    times[B] = [heuristicTime, LPTime]
+    println(times[B])
+    #StatsPlots.plot!(obj1_LP[2:length(js)], obj2_LP[2:length(js)], seriestype=:scatter, label = "LP-Loose")
+    #f = serialize("LPvsHeuristicTimes.dat", times)
+end
+
+function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "las2", epsilonStep = 1.0, pStep = 0.5)
+    #find maximum reliability
+    minFailRes = dcpIntMinFailureConstrainedCost(probParams, C, B, w = w, W = W)
+    minFailProb = minFailRes[2]
+
+    #save values
+    designs = [value.(minFailRes[3])]
+    objVals = [dcpCostRate(probParams, designs[1])]
+    logFailRates = [minFailProb]
+
+    #for range of target failure-rates
+    targetLFR = epsilonStep
+    while targetLFR < abs(minFailProb)
+        #optimise for cost
+        res = dcpIntConstrainedFailure(probParams, probLim = -targetLFR, C = C, B = B, w = w, W = W)
+        thisDesign = dcpIntBinToVar(res[4])
+        
+        #if solution is new, save it
+        match = false
+        for d in designs
+            if d == thisDesign
+                match = true
+                break
+            end
+        end
+
+        if !match
+            push!(designs, thisDesign)
+            push!(objVals, res[2])
+            push!(logFailRates, res[3])
+        end
+
+        targetLFR = -res[3] + epsilonStep
+    end              
+
+    #eliminate dominated designs
+    dynamicDesigns = eliminateDominatedDesigns(designs)
+    dynamicObjVals = []
+    dynamicLogFailRates = []
+
+    count = 1
+    maxP = 0.0
+    for design in dynamicDesigns
+        
+        probParamsD = maskProblemParams(probParams, design)
+        designMasked = []
+        
+        for d in design
+            if d >= 1
+                push!(designMasked, d)
+            end
+        end
+
+        highLogFailRate = 0.0
+        faLogFailRate = 0.0
+        for k in 1:length(designs)
+            if design == designs[k]
+                faLogFailRate = logFailRates[k]
+                break
+            end
+        end
+
+        objValsD = []
+        logFailRatesD = []
+        probParamsD.p = 1.0
+        pScale = 10.0^(pStep)
+        #println("Min LFR: "*string(faLogFailRate))
+
+        while abs((exp(highLogFailRate) - exp(faLogFailRate))/exp(faLogFailRate)) >= 0.01
+            probParamsD.p = probParamsD.p*pScale
+            if maxP < probParamsD.p 
+                maxP = probParamsD.p 
+            end
+
+            epsilon = min(probParamsD.p*exp(faLogFailRate)/100.0, 0.00001)
+            test = rviESSA(probParamsD, designMasked, epsilon, nMax = 10000, delScale = 1, printProgress = false, modCounter = 1000, actionType = method)
+            if method != "full"
+                test = rpiESSA(probParamsD, designMasked, test[2], epsilon)
+            end 
+
+            push!(objValsD,test[1][1])
+            
+            push!(logFailRatesD, log(test[1][2]/probParamsD.p))
+            highLogFailRate = log(test[1][2]/probParamsD.p)
+            
+        end
+        push!(dynamicObjVals, objValsD)
+        push!(dynamicLogFailRates, logFailRatesD)
+
+        count = count + 1
+    end    
+
+    #TO DO: Identify non-dom solutions
+    allObjVals = deepcopy(objVals)
+    allLFRs = deepcopy(logFailRates)
+    for i in 1:length(dynamicObjVals)
+        append!(allObjVals, dynamicObjVals[i])
+        append!(allLFRs, dynamicLogFailRates[i])
+    end
+    
+    nonDomOJs = []
+    nonDomLFRs = []
+    for i in 1:length(allObjVals)
+        dom = false
+        for j in 1:length(allObjVals)
+            if i != j && ((allObjVals[i] >= allObjVals[j] && allLFRs[i] > allLFRs[j]) || (allObjVals[i] > allObjVals[j] && allLFRs[i] >= allLFRs[j]))
+                dom = true
+                break
+            end
+        end
+        if !dom
+            push!(nonDomOJs, allObjVals[i])
+            push!(nonDomLFRs, allLFRs[i])
+        end
+    end
+
+    return designs, objVals, logFailRates, dynamicDesigns, dynamicObjVals, dynamicLogFailRates, nonDomOJs, nonDomLFRs, maxP
+end 
+
+####################################
+#Experiment#########################
+####################################
+numReps = 10
+outDict = Dict()
+#f = serialize("Exp30Apr24.big", outDict)
+outDict = deserialize("Exp30Apr24.big")
+for i in 7:14
+    println("Set: "*string(i))
+    for j in 3:5
+        println("Constraint "*string(j))
+        probParams = copy(probParamses[i])
+        C = Cs[i]
+        w = ws[i]
+        B = minimum(w)*j
+        W = B
+
+        ####
+        #FAS
+        ####
+        print("FAS: ")
+        outDict[i,j,"FAS","time"] = []
+        for k in 1:numReps
+            t = time()
+            outDict[i,j,"FAS","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "full")
+            heuristicTime = time() - t 
+            push!(outDict[i,j,"FAS","time"], heuristicTime)
+            print(string(k)*", ")
+        end
+        println() 
+        f = serialize("Exp30Apr24.big", outDict)
+
+        ####
+        #LAS1
+        ####
+        print("LAS1: ")
+        outDict[i,j,"LAS1","time"] = []
+        for k in 1:numReps
+            t = time()
+            outDict[i,j,"LAS1","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "las1")
+            heuristicTime = time() - t 
+            push!(outDict[i,j,"LAS1","time"], heuristicTime)
+            print(string(k)*", ")
+        end
+        println()
+        f = serialize("Exp30Apr24.big", outDict)
+
+        ####
+        #LAS2
+        ####
+        print("LAS2: ")
+        outDict[i,j,"LAS2","time"] = []
+        for k in 1:numReps
+            t = time()
+            outDict[i,j,"LAS2","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "las2")
+            heuristicTime = time() - t 
+            push!(outDict[i,j,"LAS2","time"], heuristicTime)
+            print(string(k)*", ")
+        end
+        println()
+        f = serialize("Exp30Apr24.big", outDict)
+
+        maxP = outDict[i,j,"FAS","out"][9]
+
+        #####
+        #LP##
+        #####
+
+        print("LP: ")
+        outDict[i,j,"LP","time"] = []
+        for k in 1:numReps
+            LPstartT = time()
+            obj1_LP = []
+            obj2_LP = []
+            js = [i/2 for i in 1:2*ceil(log10(maxP))]
+            ps = [10.0^js[i] for i in 1:length(js)]
+            outDict[i,j,"LP","out"] = mdpDesignLP_MultiP(probParams, C, B, w, W, ps; speak = false, careful = false, timeLimit = 300)
+
+
+            LPTime = time() - LPstartT
+            push!(outDict[i,j,"LP","time"], LPTime)
+            print(string(k)*", ")
+            GC.gc()
+        end
+        println()
+        f = serialize("Exp30Apr24.big", outDict)
+    end
+end
+
+blah = deserialize("Exp30Apr24.big")
+keys(blah)
+
+
+#Error Checking
+outDict = deserialize("Exp30Apr24.big")
+numReps = 1
+for i in 6
+    println("Set: "*string(i))
+    for j in 5
+        println("Constraint "*string(j))
+        probParams = copy(probParamses[i])
+        C = Cs[i]
+        w = ws[i]
+        B = minimum(w)*j
+        W = B
+
+        ####
+        #FAS
+        ####
+        print("FAS: ")
+        outDict[i,j,"FAS","time"] = []
+        for k in 1:numReps
+            t = time()
+            outDict[i,j,"FAS","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "full")
+            heuristicTime = time() - t 
+            push!(outDict[i,j,"FAS","time"], heuristicTime)
+            print(string(k)*", ")
+        end
+        println() 
+        f = serialize("Exp30Apr24.big", outDict)
+
+        ####
+        #LAS1
+        ####
+        print("LAS1: ")
+        outDict[i,j,"LAS1","time"] = []
+        for k in 1:numReps
+            t = time()
+            outDict[i,j,"LAS1","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "las1")
+            heuristicTime = time() - t 
+            push!(outDict[i,j,"LAS1","time"], heuristicTime)
+            print(string(k)*", ")
+        end
+        println()
+        f = serialize("Exp30Apr24.big", outDict)
+
+        ####
+        #LAS2
+        ####
+        print("LAS2: ")
+        outDict[i,j,"LAS2","time"] = []
+        for k in 1:numReps
+            t = time()
+            outDict[i,j,"LAS2","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "las2")
+            heuristicTime = time() - t 
+            push!(outDict[i,j,"LAS2","time"], heuristicTime)
+            print(string(k)*", ")
+        end
+        println()
+        f = serialize("Exp30Apr24.big", outDict)
+
+        maxP = outDict[i,j,"FAS","out"][9]
+
+        #####
+        #LP##
+        #####
+
+        print("LP: ")
+        outDict[i,j,"LP","time"] = []
+        for k in 1:numReps
+            obj1_LP = []
+            obj2_LP = []
+            js = [i/2 for i in 1:2*ceil(log10(maxP))]
+            ps = [10.0^js[i] for i in 1:length(js)]
+            try
+                LPstartT = time()
+                outDict[i,j,"LP","out"] = mdpDesignLP_MultiP(probParams, C, B, w, W, ps; speak = true, careful = false, timeLimit = 300)
+                LPTime = time() - LPstartT
+                push!(outDict[i,j,"LP","time"], LPTime)
+            catch err
+                outDict[i,j,"LP","out"] = "Fail"
+                push!(outDict[i,j,"LP","time"], NaN)
+            end
+
+            print(string(k)*", ")
+        end
+        println()
+        f = serialize("Exp30Apr24.big", outDict)
+    end
+end
