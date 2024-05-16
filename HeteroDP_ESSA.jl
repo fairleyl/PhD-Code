@@ -183,7 +183,7 @@ using Distributed
 
     function copy(probParams::problemParams)
         (; N, beta, alpha, tau, c, r, p) = probParams
-        return problemParams(N, beta, alpha, tau, c, r, p)
+        return problemParams(deepcopy(N), deepcopy(beta), deepcopy(alpha), deepcopy(tau), deepcopy(c), deepcopy(r), deepcopy(p))
     end
 
     function costRateESSA(s, probParams, D)
@@ -767,7 +767,80 @@ function q(probParams, D)
     return q
 end
 
-function q2(probParams, D; goalTime = Inf)
+function qWithPolicy(probParams, stateSpace, D, policy)
+    #STUFF
+    (;N, alpha, tau, c, p, r) = probParams
+    q = Dict()
+    for s in stateSpace
+        a = policy[s]
+        
+        sPost = postActionState(s,a)
+        for sPrime in stateSpace
+            q[s,sPrime] = 0.0
+        end
+
+        total = 0.0
+        for i in 1:N
+            sRepSucc = deepcopy(sPost)
+            sRepFail = deepcopy(sPost)
+            sDeg = deepcopy(sPost)
+            sRepSucc[i] = sRepSucc[i] .+ [-1,0]
+            sRepFail[i] = sRepFail[i] .+ [-1,1]
+            sDeg[i] = sDeg[i] .+ [0,1]
+
+            sDiff = (s != sRepFail)
+            q[s,sRepSucc] = tau[i]*sPost[i][1]
+            q[s,sRepFail] = sDiff*alpha[i]*sPost[i][1]
+            q[s,sDeg] = (D[i] - sum(sPost[i]))*alpha[i]
+
+            total += (tau[i] + sDiff*alpha[i])*sPost[i][1] + (D[i] - sum(sPost[i]))*alpha[i]
+        end
+
+        q[s,s] = -total
+        
+    end 
+    return q
+end
+
+function policyFromFreqs(f, stateSpace; actionType = "full")
+    actionSpaceFunc = print #placeholder function
+    if actionType == "full"
+        actionSpaceFunc = enumerateFeasibleActionsESSA
+    elseif actionType == "las1"
+        actionSpaceFunc = enumerateFeasibleActionsESSA_LAS1
+    elseif actionType == "las2"
+        actionSpaceFunc = enumerateFeasibleActionsESSA_LAS2
+    else
+        throw(DomainError(actionType, "Invalid actionType"))
+    end
+
+    total = 0.0
+    s0 = fill([0,1], 4)
+    policy = Dict()
+    for s in stateSpace 
+        actionSpace = actionSpaceFunc(s)
+        fs = [f[[s,a]] for a in actionSpace]
+        if s == s0
+            #println(fs)
+        end
+        
+        index = argmax(fs)
+        a = actionSpace[index]
+        if maximum(fs) > 0.0
+            #println(maximum(fs))
+            #println(s)
+            #println(a)
+            total += maximum(fs)
+        end
+        policy[s] = a
+    end
+    #println(total)
+    return policy
+       
+end 
+
+
+function q2(probParams, D; goalTime = Inf, actionType = "full")
     #STUFF
     if time() > goalTime 
         return Dict()
@@ -777,7 +850,17 @@ function q2(probParams, D; goalTime = Inf)
     q = Dict()
     stateSpace = enumerateStatesESSA(D)
     for s in stateSpace
-        actionSpace = enumerateFeasibleActionsESSA(s)
+        actionSpace = []
+        if actionType == "full"
+            actionSpace = enumerateFeasibleActionsESSA(s)
+        elseif actionType == "las1"
+            actionSpace = enumerateFeasibleActionsESSA_LAS1(s)
+        elseif actionType == "las2"
+            actionSpace = enumerateFeasibleActionsESSA_LAS2(s)
+        else
+            throw(DomainError(actionType, "Invalid actionType"))
+        end
+
         for a in actionSpace
             sPost = postActionState(s,a)
             nHood = neighbourhood(sPost)
@@ -811,7 +894,8 @@ function q2(probParams, D; goalTime = Inf)
     return q
 end
 
-function reverseNeighbourhood(s, D)
+
+function reverseNeighbourhood(s, D; actionType = "full")
     N = length(s)
     postStateHood = []
     saHood = []
@@ -833,7 +917,17 @@ function reverseNeighbourhood(s, D)
     end
     for sPost in postStateHood
         auxState = [[0,sPost[i][1]] for i in 1:N]
-        actionSpace = enumerateFeasibleActionsESSA(auxState)
+        actionSpace = []
+        if actionType == "full"
+            actionSpace = enumerateFeasibleActionsESSA(auxState)
+        elseif actionType == "las1"
+            actionSpace = enumerateFeasibleActionsESSA_LAS1(auxState)
+        elseif actionType == "las2"
+            actionSpace = enumerateFeasibleActionsESSA_LAS2(auxState)
+        else
+            throw(DomainError(actionType, "Invalid actionType"))
+        end
+
         for a in actionSpace
             sPre = deepcopy(sPost)
             for i in 1:N
@@ -848,7 +942,6 @@ function reverseNeighbourhood(s, D)
     return saHood
 end
 
-probParams = problemParams(2, 1.0, [0.1,0.2], [1.0, 1.0], [2.0,1.0], [100.0, 50.0], 1000.0)
 
 function mdpDesignLP(probParams::problemParams, C, B, w, W; minProb = 0.0, speak = false, careful = true)
     #Get component parameters
@@ -981,7 +1074,7 @@ function mdpDesignLP(probParams::problemParams, C, B, w, W; minProb = 0.0, speak
     return model, opCost, reliability , f, x
 end
 
-function mdpDesignLP_MultiP(probParams::problemParams, C, B, w, W, ps; speak = false, careful = true, timeLimit = Inf, memLim = 12)
+function mdpDesignLP_MultiP(probParams::problemParams, C, B, w, W, ps; speak = false, careful = true, timeLimit = Inf, memLim = 12, actionType = "full")
     goalTime = Inf
     if timeLimit < Inf
         goalTime = time() + timeLimit
@@ -1012,7 +1105,16 @@ function mdpDesignLP_MultiP(probParams::problemParams, C, B, w, W, ps; speak = f
     stateSpace = enumerateStatesESSA(upper)
     stateActionSpace = []
     for s in stateSpace
-        actionSpace = enumerateFeasibleActionsESSA(s)
+        actionSpace = []
+        if actionType == "full"
+            actionSpace = enumerateFeasibleActionsESSA(s)
+        elseif actionType == "las1"
+            actionSpace = enumerateFeasibleActionsESSA_LAS1(s)
+        elseif actionType == "las2"
+            actionSpace = enumerateFeasibleActionsESSA_LAS2(s)
+        else
+            throw(DomainError(actionType, "Invalid actionType"))
+        end
         for a in actionSpace
             #if sum(s[i][2] for i in 1:N) < sum(upper) || a != fill(0, N)
             push!(stateActionSpace, [s, a])
@@ -1042,7 +1144,7 @@ function mdpDesignLP_MultiP(probParams::problemParams, C, B, w, W, ps; speak = f
     end
 
     #construct matrix of infinitesimal generator and instant costs
-    qMatrix = q2(probParams, upper; goalTime = goalTime)
+    qMatrix = q2(probParams, upper; goalTime = goalTime, actionType = actionType)
 
     if goalTime < time()
         return "TimeOut", [], [],[]
@@ -1050,7 +1152,7 @@ function mdpDesignLP_MultiP(probParams::problemParams, C, B, w, W, ps; speak = f
 
     cMatrix = Dict()
     for sa in stateActionSpace
-        cMatrix[sa] = costRateESSA(sa[1],sa[2],probParams, upper)
+        cMatrix[sa] = costRateESSA(sa[1],sa[2],thisProbParams, upper)
     end
 
     if goalTime < time()
@@ -1062,8 +1164,17 @@ function mdpDesignLP_MultiP(probParams::problemParams, C, B, w, W, ps; speak = f
     end
 
     for sPrime in stateSpace
-        feasStateActionSpace = reverseNeighbourhood(sPrime, upper)
-        feasActionSpace = enumerateFeasibleActionsESSA(sPrime)
+        feasStateActionSpace = reverseNeighbourhood(sPrime, upper; actionType = actionType)
+        feasActionSpace = []
+        if actionType == "full"
+            feasActionSpace = enumerateFeasibleActionsESSA(sPrime)
+        elseif actionType == "las1"
+            feasActionSpace = enumerateFeasibleActionsESSA_LAS1(sPrime)
+        elseif actionType == "las2"
+            feasActionSpace = enumerateFeasibleActionsESSA_LAS2(sPrime)
+        else
+            throw(DomainError(actionType, "Invalid actionType"))
+        end
         #@constraint(model, sum(qMatrix[sa[1],sa[2],sPrime]*f[sa] for sa in stateActionSpace) == 0)
         @constraint(model, sum(qMatrix[sPrime,a,sPrime]*f[[sPrime,a]] for a in feasActionSpace) + sum(qMatrix[sa[1],sa[2],sPrime]*f[sa] for sa in feasStateActionSpace) == 0)
         if goalTime < time()
@@ -1102,17 +1213,17 @@ function mdpDesignLP_MultiP(probParams::problemParams, C, B, w, W, ps; speak = f
     xs = []
 
     for p in ps
-        if goalTime - time() < 0
+        t = goalTime - time()
+        if  t < 0
             return "TimeOut", opCosts, reliabilities, xs
+        else
+            set_time_limit_sec(model, t)
         end
 
         @objective(model,
         Min,
         sum((cMatrix[sa][1] + p*cMatrix[sa][2])*f[sa] for sa in stateActionSpace))
 
-        if timeLimit < Inf
-            set_time_limit_sec(model, goalTime - time())
-        end
 
         optimize!(model)
 
@@ -1121,7 +1232,7 @@ function mdpDesignLP_MultiP(probParams::problemParams, C, B, w, W, ps; speak = f
         set_start_value.(y, y_solution)
 
         opCost = sum(cMatrix[sa][1]*value(f[sa]) for sa in stateActionSpace)
-        reliability = sum(cMatrix[sa][2]*value(f[sa]) for sa in stateActionSpace)/p
+        reliability = log(sum((cMatrix[sa][2])*value(f[sa]) for sa in stateActionSpace)) 
 
         push!(opCosts, opCost)
         push!(reliabilities, reliability)
@@ -1135,13 +1246,395 @@ function mdpDesignLP_MultiP(probParams::problemParams, C, B, w, W, ps; speak = f
     return "Success", opCosts, reliabilities, xs
 end
 
+function mdpNonDesignLP_MultiP(probParams::problemParams, D, ps; speak = false, careful = true, timeLimit = Inf, memLim = 12, actionType = "full", M = 1.0)
+    goalTime = Inf
+    if timeLimit < Inf
+        goalTime = time() + timeLimit
+    end
+
+    #Get component parameters
+    (;N, alpha, tau, c, p, r) = probParams
+    thisProbParams = copy(probParams)
+    thisProbParams.p = 1.0
+
+    #start LP model and set attributes
+    model = direct_model(Gurobi.Optimizer(GRB_ENV))
+    set_optimizer_attribute(model, "OutputFlag", 0)
+    if careful
+        set_optimizer_attribute(model, "IntegralityFocus", 1)
+        set_optimizer_attribute(model, "NumericFocus", 3)
+        set_optimizer_attribute(model, "Quad", 1)
+        set_optimizer_attribute(model, "FeasibilityTol", 1e-9)
+        set_optimizer_attribute(model, "OptimalityTol", 1e-9)
+        set_optimizer_attribute(model, "MarkowitzTol", 0.999)
+    end
+
+    set_optimizer_attribute(model, "SoftMemLimit", memLim)
+    #find maximum state space and state-action space, ignoring null action in worst state
+    stateSpace = enumerateStatesESSA(D)
+    stateActionSpace = []
+    for s in stateSpace
+        actionSpace = []
+        if actionType == "full"
+            actionSpace = enumerateFeasibleActionsESSA(s)
+        elseif actionType == "las1"
+            actionSpace = enumerateFeasibleActionsESSA_LAS1(s)
+        elseif actionType == "las2"
+            actionSpace = enumerateFeasibleActionsESSA_LAS2(s)
+        else
+            throw(DomainError(actionType, "Invalid actionType"))
+        end
+        for a in actionSpace
+            #if sum(s[i][2] for i in 1:N) < sum(upper) || a != fill(0, N)
+            push!(stateActionSpace, [s, a])
+            #end
+        end
+    end
+
+    if goalTime < time()
+        return "TimeOut", [], []
+    end
+
+    if speak
+        println("State-Action Space Constructed")
+        print(length(stateActionSpace))
+        println(" variables")
+    end
+
+
+    #define state-action frequency and binary design variables 
+    @variable(model, f[stateActionSpace] >= 0, start = 0.0)
+    #@variable(model, x[indices] >= 0, start = 0.0) #linear relaxation
+
+    if goalTime < time()
+        return "TimeOut", [], []
+    end
+
+    #construct matrix of infinitesimal generator and instant costs
+    qMatrix = q2(probParams, D; goalTime = goalTime, actionType = actionType)
+
+    if speak
+        println("q loaded")
+    end 
+
+    if goalTime < time()
+        return "TimeOut", [], []
+    end
+
+    cMatrix = Dict()
+    for sa in stateActionSpace
+        cMatrix[sa] = costRateESSA(sa[1],sa[2],thisProbParams, D)
+    end
+
+    if goalTime < time()
+        return "TimeOut", [], []
+    end
+
+    if speak
+        println("c loaded")
+    end
+
+    for sPrime in stateSpace
+        feasStateActionSpace = reverseNeighbourhood(sPrime, D; actionType = actionType)
+        feasActionSpace = []
+        if actionType == "full"
+            feasActionSpace = enumerateFeasibleActionsESSA(sPrime)
+        elseif actionType == "las1"
+            feasActionSpace = enumerateFeasibleActionsESSA_LAS1(sPrime)
+        elseif actionType == "las2"
+            feasActionSpace = enumerateFeasibleActionsESSA_LAS2(sPrime)
+        else
+            throw(DomainError(actionType, "Invalid actionType"))
+        end
+        #@constraint(model, sum(qMatrix[sa[1],sa[2],sPrime]*f[sa] for sa in stateActionSpace) == 0)
+        @constraint(model, sum(qMatrix[sPrime,a,sPrime]*f[[sPrime,a]]/M for a in feasActionSpace) + sum(qMatrix[sa[1],sa[2],sPrime]*f[sa]/M for sa in feasStateActionSpace) == 0)
+        if goalTime < time()
+            return "TimeOut", [], []
+        end
+    end
+    
+
+    #probabilities sum to one
+    @constraint(model, sum(f[sa] for sa in stateActionSpace) == M)
+
+    if speak
+        println("Constraints Loaded")
+    end
+
+    opCosts = []
+    reliabilities = []
+
+    policy = Dict()
+    policySeq = Dict()
+    for p in ps
+        t = goalTime - time()
+        if  t < 0
+            return "TimeOut", opCosts, reliabilities
+        else
+            set_time_limit_sec(model, t)
+        end
+
+        @objective(model,
+        Min,
+        sum((cMatrix[sa][1]/M + p*cMatrix[sa][2]/M)*f[sa] for sa in stateActionSpace))
+
+
+        optimize!(model)
+
+        y = all_variables(model)
+        y_solution = value.(y)
+        set_start_value.(y, y_solution)
+
+        opCost = 0.0
+        reliability = 0.0
+        if actionType == "full"
+            policy = policyFromFreqs(value.(f), stateSpace)
+            opCost = sum(cMatrix[sa][1]*value(f[sa])/M for sa in stateActionSpace)
+            reliability = log(sum((cMatrix[sa][2])*value(f[sa])/M for sa in stateActionSpace)) 
+        else
+            policy = policyFromFreqs(value.(f), stateSpace; actionType = actionType)
+            policySeq = policySequencer(policy)
+            status, opCost, reliability = mdpPELP(probParams, stateSpace, D, policySeq)
+        end
+
+        push!(opCosts, opCost)
+        push!(reliabilities, reliability)
+    end
+
+    return "Success", opCosts, reliabilities, policy
+end
+
+function mdpNonDesignLP_Dual_MultiP(probParams::problemParams, D, ps; speak = false, careful = true, timeLimit = Inf, memLim = 12, actionType = "full", M = 1.0)
+    goalTime = Inf
+    if timeLimit < Inf
+        goalTime = time() + timeLimit
+    end
+
+    #Get component parameters
+    (;N, alpha, tau, c, p, r) = probParams
+    thisProbParams = copy(probParams)
+    thisProbParams.p = 1.0
+
+    #start LP model and set attributes
+    model = direct_model(Gurobi.Optimizer(GRB_ENV))
+    set_optimizer_attribute(model, "OutputFlag", 0)
+    if careful
+        set_optimizer_attribute(model, "IntegralityFocus", 1)
+        set_optimizer_attribute(model, "NumericFocus", 3)
+        set_optimizer_attribute(model, "Quad", 1)
+        set_optimizer_attribute(model, "FeasibilityTol", 1e-9)
+        set_optimizer_attribute(model, "OptimalityTol", 1e-9)
+        set_optimizer_attribute(model, "MarkowitzTol", 0.999)
+    end
+
+    set_optimizer_attribute(model, "SoftMemLimit", memLim)
+    #find maximum state space and state-action space, ignoring null action in worst state
+    stateSpace = enumerateStatesESSA(D)
+    # stateActionSpace = []
+    # for s in stateSpace
+    #     actionSpace = []
+    #     if actionType == "full"
+    #         actionSpace = enumerateFeasibleActionsESSA(s)
+    #     elseif actionType == "las1"
+    #         actionSpace = enumerateFeasibleActionsESSA_LAS1(s)
+    #     elseif actionType == "las2"
+    #         actionSpace = enumerateFeasibleActionsESSA_LAS2(s)
+    #     else
+    #         throw(DomainError(actionType, "Invalid actionType"))
+    #     end
+    #     for a in actionSpace
+    #         #if sum(s[i][2] for i in 1:N) < sum(upper) || a != fill(0, N)
+    #         push!(stateActionSpace, [s, a])
+    #         #end
+    #     end
+    # end
+
+    if goalTime < time()
+        return "TimeOut", [], []
+    end
+
+    if speak
+        println("State Space Constructed")
+        print(length(stateActionSpace))
+        println(" variables")
+    end
+
+
+    #define state-action frequency and binary design variables 
+    @variable(model, h[stateSpace] >= 0, start = 0.0)
+    @variable(model, g)
+    #@variable(model, x[indices] >= 0, start = 0.0) #linear relaxation
+
+    if goalTime < time()
+        return "TimeOut", [], []
+    end
+
+    #construct matrix of infinitesimal generator and instant costs
+    qMatrix = q2(probParams, D; goalTime = goalTime, actionType = actionType)
+
+    if speak
+        println("q loaded")
+    end 
+
+    if goalTime < time()
+        return "TimeOut", [], []
+    end
+
+    cMatrix = Dict()
+    for sa in stateActionSpace
+        cMatrix[sa] = costRateESSA(sa[1],sa[2],thisProbParams, D)
+    end
+
+    if goalTime < time()
+        return "TimeOut", [], []
+    end
+
+    if speak
+        println("c loaded")
+    end
+
+    @objective(model, Max, g)
+
+    if speak
+        println("Constraints Loaded")
+    end
+
+
+    for p in ps
+        t = goalTime - time()
+        if  t < 0
+            return "TimeOut", opCosts, reliabilities
+        else
+            set_time_limit_sec(model, t)
+        end
+
+        for s in stateSpace
+            actionSpace = enumerateFeasibleActionsESSA(s)
+            for a in actionSpace
+                @constraint(model, g - sum(q[s,a,sPrime]*h[sPrime] for sPrime in neighbourhood(postActionState(s,a))))
+            end
+        end
+
+        @optimize(model)
+        
+        #tbc
+        #idea, take reduced costs as frequencies to recalculate opCost and reliability
+
+        # opCost = 0.0
+        # reliability = 0.0
+        # if actionType == "full"
+        #     policy = policyFromFreqs(value.(f), stateSpace)
+        #     opCost = sum(cMatrix[sa][1]*value(f[sa])/M for sa in stateActionSpace)
+        #     reliability = log(sum((cMatrix[sa][2])*value(f[sa])/M for sa in stateActionSpace)) 
+        # else
+        #     policy = policyFromFreqs(value.(f), stateSpace; actionType = actionType)
+        #     policySeq = policySequencer(policy)
+        #     status, opCost, reliability = mdpPELP(probParams, stateSpace, D, policySeq)
+        # end
+
+        # push!(opCosts, opCost)
+        # push!(reliabilities, reliability)
+    end
+
+    #outputs will likely be changed
+    return "Success", opCosts, reliabilities, policy
+end
+
+function mdpPELP(probParams::problemParams, stateSpace, D, policy; speak = false, careful = true, timeLimit = Inf, memLim = 12)
+    goalTime = Inf
+    if timeLimit < Inf
+        goalTime = time() + timeLimit
+    end
+
+    #Get component parameters
+    (;N, alpha, tau, c, p, r) = probParams
+    thisProbParams = copy(probParams)
+    thisProbParams.p = 1.0
+    p = 1.0
+
+    #start LP model and set attributes
+    model = direct_model(Gurobi.Optimizer(GRB_ENV))
+    set_optimizer_attribute(model, "OutputFlag", 0)
+    if careful
+        set_optimizer_attribute(model, "IntegralityFocus", 1)
+        set_optimizer_attribute(model, "NumericFocus", 3)
+        set_optimizer_attribute(model, "Quad", 1)
+        set_optimizer_attribute(model, "FeasibilityTol", 1e-9)
+        set_optimizer_attribute(model, "OptimalityTol", 1e-9)
+        set_optimizer_attribute(model, "MarkowitzTol", 0.999)
+    end
+
+    set_optimizer_attribute(model, "SoftMemLimit", memLim)
+
+
+    #define state-action frequency and binary design variables 
+    @variable(model, f[stateSpace] >= 0, start = 0.0)
+
+    if goalTime < time()
+        return "TimeOut", [], []
+    end
+
+    #construct matrix of infinitesimal generator and instant costs
+    qMatrix = qWithPolicy(probParams, stateSpace, D, policy)
+
+    if goalTime < time()
+        return "TimeOut", [], []
+    end
+
+    cMatrix = Dict()
+    for s in stateSpace
+        cMatrix[s] = costRateESSA(s,policy[s],thisProbParams, D)
+    end
+
+    if goalTime < time()
+        return "TimeOut", [], []
+    end
+
+    if speak
+        println("q and c loaded")
+    end
+
+    for sPrime in stateSpace
+        @constraint(model, sum(qMatrix[s,sPrime]*f[s] for s in stateSpace) == 0) 
+    end
+    
+    if goalTime < time()
+        return "TimeOut", [], []
+    end
+
+    #probabilities sum to one
+    @constraint(model, sum(f[s] for s in stateSpace) == 1.0)
+
+    if speak
+        println("Constraints Loaded")
+    end
+
+    t = goalTime - time()
+    if  t < 0
+        return "TimeOut", opCosts, reliabilities
+    else
+        set_time_limit_sec(model, t)
+    end
+
+    optimize!(model)
+
+    opCost = sum(cMatrix[s][1]*value(f[s]) for s in stateSpace)
+    reliability = log(sum((cMatrix[s][2])*value(f[s]) for s in stateSpace)) 
+
+    return "Success", opCost, reliability
+end
+
 function dcpCostRate(probParams, x)
     (;N,alpha,tau,c,r) = probParams
     qs = alpha ./ (alpha .+ tau)
+    if length(x) == 1
+        return sum(r[i]*qs[i]*x[i] for i in 1:N) + c[1]*(1 - qs[1]^x[1]) 
+    end
+
     return sum(r[i]*qs[i]*x[i] for i in 1:N) + c[1]*(1 - qs[1]^x[1]) + sum( c[i]*prod(qs[j]^x[j] for j in 1:(i - 1))*(1 - qs[i]^x[i]) for i in 2:N)
 end
 
-Gurobi._is_feasible
+
 #input list of unique designs (copies should already be filtered)
 function eliminateDominatedDesigns(designs)
     nonDom = []
@@ -1381,7 +1874,7 @@ taus = [fill(1.0,4),
         fill(1.0,3),
         fill(1.0,4)]
 
-cs = copy(taus)
+cs = deepcopy(taus)
 
 rs = [fill(100.0,4),
     fill(100.0,3),
@@ -1918,7 +2411,7 @@ function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "las
     #find maximum reliability
     minFailRes = dcpIntMinFailureConstrainedCost(probParams, C, B, w = w, W = W)
     minFailProb = minFailRes[2]
-
+    println(value.(minFailRes[3]))
     #save values
     designs = [value.(minFailRes[3])]
     objVals = [dcpCostRate(probParams, designs[1])]
@@ -1988,17 +2481,24 @@ function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "las
                 maxP = probParamsD.p 
             end
 
-            epsilon = min(probParamsD.p*exp(faLogFailRate)/100.0, 0.00001)
-            test = rviESSA(probParamsD, designMasked, epsilon, nMax = 10000, delScale = 1, printProgress = false, modCounter = 1000, actionType = method)
-            if method != "full"
-                test = rpiESSA(probParamsD, designMasked, test[2], epsilon)
-            end 
+            if !occursin("-lp",method)
+                epsilon = min(probParamsD.p*exp(faLogFailRate)/100.0, 0.00001)
+                test = rviESSA(probParamsD, designMasked, epsilon, nMax = 10000, delScale = 1, printProgress = false, modCounter = 1000, actionType = method)
+                if method != "full"
+                    test = rpiESSA(probParamsD, designMasked, test[2], epsilon)
+                end 
 
-            push!(objValsD,test[1][1])
-            
-            push!(logFailRatesD, log(test[1][2]/probParamsD.p))
-            highLogFailRate = log(test[1][2]/probParamsD.p)
-            
+                push!(objValsD,test[1][1])
+                
+                push!(logFailRatesD, log(test[1][2]/probParamsD.p))
+                highLogFailRate = log(test[1][2]/probParamsD.p)
+            else
+                actionType = method[1:length(method)-3]
+                test = mdpNonDesignLP_MultiP(probParamsD, designMasked, [probParamsD.p]; actionType = actionType)
+                push!(objValsD, test[2][1])
+                push!(logFailRatesD, test[3][1])
+                highLogFailRate = test[3][1]
+            end            
         end
         push!(dynamicObjVals, objValsD)
         push!(dynamicLogFailRates, logFailRatesD)
@@ -2033,6 +2533,7 @@ function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "las
     return designs, objVals, logFailRates, dynamicDesigns, dynamicObjVals, dynamicLogFailRates, nonDomOJs, nonDomLFRs, maxP
 end 
 
+
 ####################################
 #Experiment#########################
 ####################################
@@ -2040,7 +2541,7 @@ numReps = 10
 outDict = Dict()
 #f = serialize("Exp30Apr24.big", outDict)
 outDict = deserialize("Exp30Apr24.big")
-for i in 7:14
+for i in 1:14
     println("Set: "*string(i))
     for j in 3:5
         println("Constraint "*string(j))
@@ -2053,54 +2554,54 @@ for i in 7:14
         ####
         #FAS
         ####
-        print("FAS: ")
-        outDict[i,j,"FAS","time"] = []
-        for k in 1:numReps
-            t = time()
-            outDict[i,j,"FAS","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "full")
-            heuristicTime = time() - t 
-            push!(outDict[i,j,"FAS","time"], heuristicTime)
-            print(string(k)*", ")
-        end
-        println() 
-        f = serialize("Exp30Apr24.big", outDict)
+        # print("FAS: ")
+        # outDict[i,j,"FAS","time"] = []
+        # for k in 1:numReps
+        #     t = time()
+        #     outDict[i,j,"FAS","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "full")
+        #     heuristicTime = time() - t 
+        #     push!(outDict[i,j,"FAS","time"], heuristicTime)
+        #     print(string(k)*", ")
+        # end
+        # println() 
+        # f = serialize("Exp30Apr24.big", outDict)
 
-        ####
-        #LAS1
-        ####
-        print("LAS1: ")
-        outDict[i,j,"LAS1","time"] = []
-        for k in 1:numReps
-            t = time()
-            outDict[i,j,"LAS1","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "las1")
-            heuristicTime = time() - t 
-            push!(outDict[i,j,"LAS1","time"], heuristicTime)
-            print(string(k)*", ")
-        end
-        println()
-        f = serialize("Exp30Apr24.big", outDict)
+        # ####
+        # #LAS1
+        # ####
+        # print("LAS1: ")
+        # outDict[i,j,"LAS1","time"] = []
+        # for k in 1:numReps
+        #     t = time()
+        #     outDict[i,j,"LAS1","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "las1")
+        #     heuristicTime = time() - t 
+        #     push!(outDict[i,j,"LAS1","time"], heuristicTime)
+        #     print(string(k)*", ")
+        # end
+        # println()
+        # f = serialize("Exp30Apr24.big", outDict)
 
-        ####
-        #LAS2
-        ####
-        print("LAS2: ")
-        outDict[i,j,"LAS2","time"] = []
-        for k in 1:numReps
-            t = time()
-            outDict[i,j,"LAS2","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "las2")
-            heuristicTime = time() - t 
-            push!(outDict[i,j,"LAS2","time"], heuristicTime)
-            print(string(k)*", ")
-        end
-        println()
-        f = serialize("Exp30Apr24.big", outDict)
+        # ####
+        # #LAS2
+        # ####
+        # print("LAS2: ")
+        # outDict[i,j,"LAS2","time"] = []
+        # for k in 1:numReps
+        #     t = time()
+        #     outDict[i,j,"LAS2","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "las2")
+        #     heuristicTime = time() - t 
+        #     push!(outDict[i,j,"LAS2","time"], heuristicTime)
+        #     print(string(k)*", ")
+        # end
+        # println()
+        # f = serialize("Exp30Apr24.big", outDict)
 
-        maxP = outDict[i,j,"FAS","out"][9]
+        # maxP = outDict[i,j,"FAS","out"][9]
 
         #####
         #LP##
         #####
-
+        maxP = outDict[i,j,"FAS","out"][9]
         print("LP: ")
         outDict[i,j,"LP","time"] = []
         for k in 1:numReps
@@ -2109,7 +2610,7 @@ for i in 7:14
             obj2_LP = []
             js = [i/2 for i in 1:2*ceil(log10(maxP))]
             ps = [10.0^js[i] for i in 1:length(js)]
-            outDict[i,j,"LP","out"] = mdpDesignLP_MultiP(probParams, C, B, w, W, ps; speak = false, careful = false, timeLimit = 300)
+            outDict[i,j,"LP","out"] = mdpDesignLP_MultiP(probParams, C, B, w, W, ps; speak = false, careful = true, timeLimit = 300)
 
 
             LPTime = time() - LPstartT
@@ -2125,6 +2626,69 @@ end
 blah = deserialize("Exp30Apr24.big")
 keys(blah)
 
+################################################################
+#Experiment for the FAS LP formulation for the heuristicTime
+################################################################
+numReps = 10
+outDict = Dict()
+#f = serialize("Exp30Apr24.big", outDict)
+outDict = deserialize("Exp30Apr24.big")
+for i in 1:14
+    println("Set: "*string(i))
+    for j in 3:5
+        println("Constraint "*string(j))
+        probParams = copy(probParamses[i])
+        C = Cs[i]
+        w = ws[i]
+        B = minimum(w)*j
+        W = B
+
+        ####
+        #FAS
+        ####
+        # print("FAS: ")
+        # outDict[i,j,"FAS-LP","time"] = []
+        # for k in 1:numReps
+        #     t = time()
+        #     outDict[i,j,"FAS-LP","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "full-lp")
+        #     heuristicTime = time() - t 
+        #     push!(outDict[i,j,"FAS-LP","time"], heuristicTime)
+        #     print(string(k)*", ")
+        # end
+        # println() 
+        # f = serialize("Exp30Apr24.big", outDict)
+
+        ####
+        #LAS1
+        ####
+        print("LAS1: ")
+        outDict[i,j,"LAS1-LP","time"] = []
+        for k in 1:numReps
+            t = time()
+            outDict[i,j,"LAS1-LP","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "las1-lp")
+            heuristicTime = time() - t 
+            push!(outDict[i,j,"LAS1-LP","time"], heuristicTime)
+            print(string(k)*", ")
+        end
+        println() 
+        f = serialize("Exp30Apr24.big", outDict)
+
+        ####
+        #LAS2
+        ####
+        print("LAS2: ")
+        outDict[i,j,"LAS2-LP","time"] = []
+        for k in 1:numReps
+            t = time()
+            outDict[i,j,"LAS2-LP","out"] = mdpDesignHeuristic(probParams, C, B, w, W; method = "las2-lp")
+            heuristicTime = time() - t 
+            push!(outDict[i,j,"LAS2-LP","time"], heuristicTime)
+            print(string(k)*", ")
+        end
+        println() 
+        f = serialize("Exp30Apr24.big", outDict)
+    end
+end
 
 #Error Checking
 outDict = deserialize("Exp30Apr24.big")
@@ -2213,3 +2777,126 @@ for i in 6
         f = serialize("Exp30Apr24.big", outDict)
     end
 end
+
+########
+#Experiment Analysis
+#########
+
+i = 6
+j = 5
+
+staticObjVals = outDict[i,j,"FAS","out"][2]
+staticLFRs = outDict[i,j,"FAS","out"][3]
+
+lpObjVals = outDict[i,j,"LP","out"][2]
+lpLFRs = outDict[i,j,"LP","out"][3]
+
+
+fasObjVals = outDict[i,j,"FAS","out"][7]
+fasLFRs = outDict[i,j,"FAS","out"][8]
+
+fasLPObjVals = outDict[i,j,"FAS-LP","out"][7]
+fasLPLFRs = outDict[i,j,"FAS-LP","out"][8]
+
+lasObjVals = outDict[i,j,"LAS1","out"][7]
+lasLFRs = outDict[i,j,"LAS1","out"][8]
+
+lasLPObjVals = outDict[i,j,"LAS1-LP","out"][7]
+lasLPLFRs = outDict[i,j,"LAS1-LP","out"][8]
+
+StatsPlots.plot(staticObjVals, staticLFRs, seriestype=:scatter, label = "DOP", markersize = 7)
+xlabel!("OpCost")
+ylabel!("LFR")
+StatsPlots.plot!(lpObjVals, lpLFRs, seriestype=:scatter, label = "LP")
+#StatsPlots.plot!(fasObjVals, fasLFRs, seriestype=:scatter, label = "FAS")
+StatsPlots.plot!(fasLPObjVals, fasLPLFRs, seriestype=:scatter, label = "FAS-LP")
+#StatsPlots.plot!(lasObjVals, lasLFRs, seriestype=:scatter, label = "LAS")
+StatsPlots.plot!(lasLPObjVals, lasLPLFRs, seriestype=:scatter, label = "LAS-LP")
+
+mean(outDict[i,j,"LP","time"])
+mean(outDict[i,j,"FAS-LP","time"])
+mean(outDict[i,j,"LAS1-LP","time"])
+
+outDict[i,j,"FAS", "out"][1]
+
+#testing
+
+i = 1
+j = 3
+probParams = copy(probParamses[i])
+C = Cs[i]
+w = ws[i]
+B = minimum(w)*j
+W = B
+test = mdpDesignHeuristic(probParams, C, B, w, W; method = "las2-lp")
+
+D = [1,1,1,1]
+test = mdpNonDesignLP_MultiP(probParams, D, [100]; speak = true, careful = true, timeLimit = Inf, memLim = 12, actionType = "las2", M = 1.0)
+mdpPELP(probParams, enumerateStatesESSA(D), D, fullyActiveESSA(D); speak = false, careful = true, timeLimit = Inf, memLim = 12)
+
+(;alpha,tau) = probParams
+p = tau./(tau .+ alpha)
+p[1]*p[2]
+
+#########################
+#Effect of usage costs
+#########################
+i = 6
+j = 5
+probParams = copy(probParamses[i])
+(; N, alpha, beta, tau, c, p, r) = probParams
+C = copy(Cs[i])
+w = copy(ws[i])
+B = minimum(w)*j
+W = B
+
+new_c = [10,5,1,1]
+alpha .*= 100
+tau .*= 100
+p = sortperm(new_c)
+probParams = problemParams(4, beta, alpha[p], tau[p], new_c[p], r[p], 1.0)
+C = C[p]
+w = w[p]
+test = mdpDesignHeuristic(probParams, C, B, w, W; method = "full-lp")
+
+staticObjVals = test[2]
+staticLFRs = test[3]
+
+dynamicObjVals = test[7]
+dynamicLFRs = test[8]
+
+StatsPlots.plot(staticObjVals, staticLFRs, seriestype=:scatter, label = "DOP", markersize = 7)
+xlabel!("OpCost")
+ylabel!("LFR")
+
+StatsPlots.plot!(dynamicObjVals, dynamicLFRs, seriestype=:scatter, label = "Dynamic")
+println(test[1])
+p
+test[4]
+problemParams
+
+#Varying rates, with fixed reliability
+p = 0.9
+tau = 1.0
+alpha = tau/p - tau
+probParams = problemParams(1, 1.0, [alpha], [tau], [1.0], [100.0], 1.0)
+C = [1]
+B = 12
+w = [1]
+W = B
+test = mdpDesignHeuristic(probParams, C, B, w, W; method = "full-lp")
+
+staticObjVals = test[2]
+staticLFRs = test[3]
+
+dynamicObjVals = test[7]
+dynamicLFRs = test[8]
+
+StatsPlots.plot(staticObjVals, staticLFRs, seriestype=:scatter, label = "DOP", markersize = 7)
+xlabel!("OpCost")
+ylabel!("LFR")
+
+StatsPlots.plot!(dynamicObjVals, dynamicLFRs, seriestype=:scatter, label = "Dynamic")
+println(test[1])
+
+#
