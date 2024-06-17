@@ -1511,11 +1511,11 @@ function mdpNonDesignLP_Dual_MultiP(probParams::problemParams, D, ps; speak = fa
         for s in stateSpace
             actionSpace = enumerateFeasibleActionsESSA(s)
             for a in actionSpace
-                @constraint(model, g - sum(q[s,a,sPrime]*h[sPrime] for sPrime in neighbourhood(postActionState(s,a))))
+                @constraint(model, g - sum(q[s,a,sPrime]*h[sPrime] for sPrime in neighbourhood(postActionState(s,a))) <= cMatrix[[s,a]])
             end
         end
 
-        @optimize(model)
+        optimize!(model)
         
         #tbc
         #idea, take reduced costs as frequencies to recalculate opCost and reliability
@@ -2407,7 +2407,7 @@ for B in 1:10
     #f = serialize("LPvsHeuristicTimes.dat", times)
 end
 
-function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "las2", epsilonStep = 1.0, pStep = 0.5)
+function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "fas-lp", epsilonStep = 1.0, pStep = 0.5)
     #find maximum reliability
     minFailRes = dcpIntMinFailureConstrainedCost(probParams, C, B, w = w, W = W)
     minFailProb = minFailRes[2]
@@ -2781,10 +2781,11 @@ end
 ########
 #Experiment Analysis
 #########
-
-i = 6
+outDict = deserialize("Exp30Apr24.big")
+i = 14
 j = 5
 
+B = j*minimum(ws[i])
 staticObjVals = outDict[i,j,"FAS","out"][2]
 staticLFRs = outDict[i,j,"FAS","out"][3]
 
@@ -2792,17 +2793,8 @@ lpObjVals = outDict[i,j,"LP","out"][2]
 lpLFRs = outDict[i,j,"LP","out"][3]
 
 
-fasObjVals = outDict[i,j,"FAS","out"][7]
-fasLFRs = outDict[i,j,"FAS","out"][8]
-
 fasLPObjVals = outDict[i,j,"FAS-LP","out"][7]
 fasLPLFRs = outDict[i,j,"FAS-LP","out"][8]
-
-lasObjVals = outDict[i,j,"LAS1","out"][7]
-lasLFRs = outDict[i,j,"LAS1","out"][8]
-
-lasLPObjVals = outDict[i,j,"LAS1-LP","out"][7]
-lasLPLFRs = outDict[i,j,"LAS1-LP","out"][8]
 
 StatsPlots.plot(staticObjVals, staticLFRs, seriestype=:scatter, label = "DOP", markersize = 7)
 xlabel!("OpCost")
@@ -2811,14 +2803,19 @@ StatsPlots.plot!(lpObjVals, lpLFRs, seriestype=:scatter, label = "LP")
 #StatsPlots.plot!(fasObjVals, fasLFRs, seriestype=:scatter, label = "FAS")
 StatsPlots.plot!(fasLPObjVals, fasLPLFRs, seriestype=:scatter, label = "FAS-LP")
 #StatsPlots.plot!(lasObjVals, lasLFRs, seriestype=:scatter, label = "LAS")
-StatsPlots.plot!(lasLPObjVals, lasLPLFRs, seriestype=:scatter, label = "LAS-LP")
+#StatsPlots.plot!(lasLPObjVals, lasLPLFRs, seriestype=:scatter, label = "LAS-LP")
 
 mean(outDict[i,j,"LP","time"])
 mean(outDict[i,j,"FAS-LP","time"])
-mean(outDict[i,j,"LAS1-LP","time"])
 
-outDict[i,j,"FAS", "out"][1]
-
+outDict[1,5,"FAS-LP","out"]
+for i in 1:14
+    println("Problem Set "*string(i))
+    for j in 3:5
+        numSol = length(outDict[i,j,"FAS-LP","out"][1])
+        println("Budget "*string(j)*", Solutions: "*string(numSol))
+    end
+end
 #testing
 
 i = 1
@@ -2839,7 +2836,7 @@ p = tau./(tau .+ alpha)
 p[1]*p[2]
 
 #########################
-#Effect of usage costs
+#Effect of usage costs (tinklering)
 #########################
 i = 6
 j = 5
@@ -2850,9 +2847,9 @@ w = copy(ws[i])
 B = minimum(w)*j
 W = B
 
-new_c = [10,5,1,1]
-alpha .*= 100
-tau .*= 100
+new_c = [1,1,1,1]
+alpha .*= 1
+tau .*= 1
 p = sortperm(new_c)
 probParams = problemParams(4, beta, alpha[p], tau[p], new_c[p], r[p], 1.0)
 C = C[p]
@@ -2873,7 +2870,47 @@ StatsPlots.plot!(dynamicObjVals, dynamicLFRs, seriestype=:scatter, label = "Dyna
 println(test[1])
 p
 test[4]
-problemParams
+probParams
+
+#effect of usage costs - fronts
+i = 6
+j = 5
+begin
+    c1 = 100
+    c2 = 10
+    probParams = copy(probParamses[i])
+    (; N, alpha, beta, tau, c, p, r) = probParams
+    C = copy(Cs[i])
+    w = copy(ws[i])
+    B = minimum(w)*j
+    W = B
+
+    new_c = [c1,c2,1,1]
+    p = sortperm(new_c)
+    probParams = problemParams(4, beta, alpha[p], tau[p], new_c[p], r[p], 1.0)
+    C = C[p]
+    w = w[p]
+    test = mdpDesignHeuristic(probParams, C, B, w, W; method = "full-lp")
+
+    
+    dynamicObjVals = test[7]
+    dynamicLFRs = test[8]
+
+    p2 = sortperm(dynamicObjVals)
+    p3 = sortperm(test[2])
+    println(test[1][p3])
+    println(test[2][p3])
+    println(test[3][p3])
+    println(p)
+    numSols = length(test[1])
+
+    #latex = "\\multirow{"*string(numSols)*"}{*}{"
+end
+StatsPlots.plot!(dynamicObjVals[p2], dynamicLFRs[p2], seriestype =:scatter, label = "c = "*string((c1,c2)))
+xlabel!("Operational Cost")
+ylabel!("LFR")
+#seriestype=:scatter
+probParams
 
 #Varying rates, with fixed reliability
 p = 0.9
