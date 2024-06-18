@@ -2228,6 +2228,8 @@ for B in 1:10
 end
 
 function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "full-lp", epsilonMin = Inf, epsilonStep = 1.0, pStep = 0.5)
+    COMP_THRESHOLD = 0.02
+    
     #find maximum reliability
     minFailRes = dcpIntMinFailureConstrainedCost(probParams, C, B, w = w, W = W)
     minFailProb = minFailRes[2]
@@ -2274,7 +2276,7 @@ function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "ful
     count = 1
     maxP = 0.0
     for design in dynamicDesigns
-
+        println(design)
         probParamsD = maskProblemParams(probParams, design)
         designMasked = []
         
@@ -2299,7 +2301,9 @@ function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "ful
         pScale = 10.0^(pStep)
         #println("Min LFR: "*string(faLogFailRate))
 
-        while abs((exp(highLogFailRate) - exp(faLogFailRate))/exp(faLogFailRate)) >= 0.01
+        while abs(highLogFailRate- faLogFailRate)/abs(faLogFailRate) >= COMP_THRESHOLD
+            
+            println(round(abs(highLogFailRate- faLogFailRate)/abs(faLogFailRate), digits = 2))
             probParamsD.p = probParamsD.p*pScale
             if maxP < probParamsD.p 
                 maxP = probParamsD.p 
