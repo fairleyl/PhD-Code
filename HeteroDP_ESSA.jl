@@ -2,9 +2,9 @@ println("Start")
 using Distributed
 #addprocs(1)
 
-@everywhere println("Start")
 
-@everywhere begin
+
+begin
     using Distributions
     using Random
     using Plots
@@ -1675,188 +1675,8 @@ function maskProblemParams(probParams, design)
 end
 
 
-@everywhere oldName = "./Documents/GitHub/PhD-Code/dcpIntExp1-10.dat"
-@everywhere results = deserialize(oldName)
-print(keys(results))
-
-for i in 1:1000
-    test = [j for j in results["dcps"][i][21] if j > 0]
-    if length(test) > 2
-        print(i)
-        break
-    end
-end
-
-test = [j for j in results["dcps"][65][21] if j > 0]
-
-[j for j in 1:10 if results["dcps"][65][21][j] > 0]
-
-@everywhere begin
-    alpha = results["alphas"][65][8:10]
-    beta = 1.0
-    tau = results["taus"][65][8:10]
-    c = results["cs"][65][8:10]
-    r = results["rs"][65][8:10]
-end 
-
-js = SharedArray{Float64}(20)
-@distributed for i = 1:20
-    js[i] = 7 + 0.1*(i - 1)
-end
-
-obj1 = SharedArray{Float64}(20)
-obj2 = SharedArray{Float64}(20)
-@sync @distributed for i = 1:20
-    j = js[i]
-    p = 10.0^j
-    probParams = problemParams(; N = 3, alpha = alpha, beta = beta, tau = tau, c = c, p = p, r = r) 
-    D = [1,4,2]
-    epsilon = p*exp(results["logFailProbs"][65][21])/100
-    test = rviESSA(probParams, D, epsilon, nMax = 10000, delScale = 1, printProgress = true, modCounter = 1000, actionType = "full")
-    println(js[i])
-    println(test[1][1])
-    obj1[i] = test[1][1]
-    println(log(test[1][2]/p))
-    obj2[i] = log(test[1][2]/p)
-    println()
-end
-
-StatsPlots.plot(results["objVals"][65][15:21], results["logFailProbs"][65][15:21], seriestype=:scatter, label = "Static Policies")
-StatsPlots.plot!(obj1, obj2, seriestype=:scatter, label = "Dynamic Policies (RVIA with FAS)")
-xlabel!("Operational Cost")
-ylabel!("log-failure-rate")
-
-obj1LAS1 = SharedArray{Float64}(20)
-obj2LAS1 = SharedArray{Float64}(20)
-
-@sync @distributed for i = 1:20
-    j = js[i]
-    p = 10.0^j
-    probParams = problemParams(; N = 3, alpha = alpha, beta = beta, tau = tau, c = c, p = p, r = r) 
-    D = [1,4,2]
-    epsilon = p*exp(results["logFailProbs"][65][21])/100
-    test = rviESSA(probParams, D, epsilon, nMax = 10000, delScale = 1, printProgress = true, modCounter = 1000, actionType = "las1")
-    println(js[i])
-    println(test[1][1])
-    obj1LAS1[i] = test[1][1]
-    println(log(test[1][2]/p))
-    obj2LAS1[i] = log(test[1][2]/p)
-    println()
-end
-
-StatsPlots.plot!(obj1LAS1, obj2LAS1, seriestype=:scatter, label = "Dynamic Policies (RVIA with LAS1)")
-
-obj1LAS2 = SharedArray{Float64}(20)
-obj2LAS2 = SharedArray{Float64}(20)
-@sync @distributed for i = 1:20
-    j = js[i]
-    p = 10.0^j
-    probParams = problemParams(; N = 3, alpha = alpha, beta = beta, tau = tau, c = c, p = p, r = r) 
-    D = [1,4,2]
-    epsilon = p*exp(results["logFailProbs"][65][21])/100
-    test = rviESSA(probParams, D, epsilon, nMax = 10000, delScale = 1, printProgress = true, modCounter = 1000, actionType = "las2")
-    println(js[i])
-    println(test[1][1])
-    obj1LAS2[i] = test[1][1]
-    println(log(test[1][2]/p))
-    obj2LAS2[i] = log(test[1][2]/p)
-    println()
-end
-
-StatsPlots.plot!(obj1LAS2, obj2LAS2, seriestype=:scatter, label = "Dynamic Policies (RVIA with LAS2)")
-
-obj1LAS1Seq = SharedArray{Float64}(20)
-obj2LAS1Seq = SharedArray{Float64}(20)
-@sync @distributed for i = 1:20
-    j = js[i]
-    p = 10.0^j
-    probParams = problemParams(; N = 3, alpha = alpha, beta = beta, tau = tau, c = c, p = p, r = r) 
-    D = [1,4,2]
-    epsilon = p*exp(results["logFailProbs"][65][21])/100
-    test = rviESSA(probParams, D, epsilon, nMax = 10000, delScale = 1, printProgress = true, modCounter = 1000, actionType = "las1")
-    test = rpiESSA(probParams, D, test[2], epsilon)
-    println(js[i])
-    println(test[1][1])
-    obj1LAS1Seq[i] = test[1][1]
-    println(log(test[1][2]/p))
-    obj2LAS1Seq[i] = log(test[1][2]/p)
-    println()
-end
-
-StatsPlots.plot!(obj1LAS1Seq, obj2LAS1Seq, seriestype=:scatter, label = "Dynamic Policies (RVIA with LAS1, Sequenced)")
-
-obj1LAS2Seq = SharedArray{Float64}(20)
-obj2LAS2Seq = SharedArray{Float64}(20)
-@sync @distributed for i = 1:20
-    j = js[i]
-    p = 10.0^j
-    probParams = problemParams(; N = 3, alpha = alpha, beta = beta, tau = tau, c = c, p = p, r = r) 
-    D = [1,4,2]
-    epsilon = p*exp(results["logFailProbs"][65][21])/100
-    test = rviESSA(probParams, D, epsilon, nMax = 10000, delScale = 1, printProgress = true, modCounter = 1000, actionType = "las2")
-    test = rpiESSA(probParams, D, test[2], epsilon)
-    println(js[i])
-    println(test[1][1])
-    obj1LAS2Seq[i] = test[1][1]
-    println(log(test[1][2]/p))
-    obj2LAS2Seq[i] = log(test[1][2]/p)
-    println()
-end
-StatsPlots.plot!(obj1LAS2Seq, obj2LAS2Seq, seriestype=:scatter, label = "Dynamic Policies (RVIA with LAS2, Sequenced)")
-
-#pi policy testing
-obj3 = SharedArray{Float64}(20)
-obj4 = SharedArray{Float64}(20)
-@everywhere D = [1,4,2]
-@everywhere policy = fullyActiveESSA(D)
-@everywhere probParams = problemParams(; N = 3, alpha = alpha, beta = beta, tau = tau, c = c, p = 1.0, r = r) 
-@everywhere epsilon = exp(results["logFailProbs"][65][21])/100
-@sync @everywhere hFA = rpeESSA(probParams, D, policy, epsilon, printProgress = true)[2]
-@everywhere stateSpace = enumerateStatesESSA(D)
-@sync @distributed for i = 1:20
-    j = js[i]
-    p = 10.0^j
-    hAdjusted = Dict()
-    for s in stateSpace
-        hAdjusted[s] = [1.0, p] .* hFA[s]
-    end
-
-    probParams = problemParams(; N = 3, alpha = alpha, beta = beta, tau = tau, c = c, p = p, r = r) 
-    epsilon = p*exp(results["logFailProbs"][65][21])/100
-    test = rpiESSA(probParams, D, hAdjusted, epsilon, nMax = 10000, delScale = 1, printProgress = true, modCounter = 1000, actionType = "las1")
-    println(js[i])
-    println(test[1][1])
-    obj3[i] = test[1][1]
-    println(log(test[1][2]/p))
-    obj4[i] = log(test[1][2]/p)
-    println()
-end
-
-StatsPlots.plot!(obj3, obj4, seriestype=:scatter, label = "Dynamic Policies (One-Step PI with LAS)")
-
-obj3Full = SharedArray{Float64}(20)
-obj4Full = SharedArray{Float64}(20)
-
-@sync @distributed for i = 1:20
-    j = js[i]
-    p = 10.0^j
-    hAdjusted = Dict()
-    for s in stateSpace
-        hAdjusted[s] = [1.0, p] .* hFA[s]
-    end
-
-    probParams = problemParams(; N = 3, alpha = alpha, beta = beta, tau = tau, c = c, p = p, r = r) 
-    epsilon = p*exp(results["logFailProbs"][65][21])/100
-    test = rpiESSA(probParams, D, hAdjusted, epsilon, nMax = 10000, delScale = 1, printProgress = true, modCounter = 1000, actionType = "full")
-    println(js[i])
-    println(test[1][1])
-    obj3Full[i] = test[1][1]
-    println(log(test[1][2]/p))
-    obj4Full[i] = log(test[1][2]/p)
-    println()
-end
-
-StatsPlots.plot!(obj3Full, obj4Full, seriestype=:scatter, label = "Dynamic Policies (One-Step PI with FAS)")
+#@everywhere oldName = "./Documents/GitHub/PhD-Code/dcpIntExp1-10.dat"
+#@everywhere results = deserialize(oldName)
 
 #link sets from literature
 taus = [fill(1.0,4),
@@ -2407,7 +2227,7 @@ for B in 1:10
     #f = serialize("LPvsHeuristicTimes.dat", times)
 end
 
-function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "fas-lp", epsilonStep = 1.0, pStep = 0.5)
+function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "full-lp", epsilonMin = Inf, epsilonStep = 1.0, pStep = 0.5)
     #find maximum reliability
     minFailRes = dcpIntMinFailureConstrainedCost(probParams, C, B, w = w, W = W)
     minFailProb = minFailRes[2]
@@ -2419,6 +2239,10 @@ function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "fas
 
     #for range of target failure-rates
     targetLFR = epsilonStep
+    if epsilonMin < Inf
+        targetLFR = epsilonMin 
+    end
+
     while targetLFR < abs(minFailProb)
         #optimise for cost
         res = dcpIntConstrainedFailure(probParams, probLim = -targetLFR, C = C, B = B, w = w, W = W)
@@ -2450,7 +2274,7 @@ function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "fas
     count = 1
     maxP = 0.0
     for design in dynamicDesigns
-        
+
         probParamsD = maskProblemParams(probParams, design)
         designMasked = []
         
@@ -2877,7 +2701,7 @@ i = 6
 j = 5
 begin
     c1 = 100
-    c2 = 10
+    c2 = 100
     probParams = copy(probParamses[i])
     (; N, alpha, beta, tau, c, p, r) = probParams
     C = copy(Cs[i])
@@ -2890,7 +2714,7 @@ begin
     probParams = problemParams(4, beta, alpha[p], tau[p], new_c[p], r[p], 1.0)
     C = C[p]
     w = w[p]
-    test = mdpDesignHeuristic(probParams, C, B, w, W; method = "full-lp")
+    test = mdpDesignHeuristic(probParams, C, B, w, W; method = "full-lp", epsilonStep = 0.01, epsilonMin = 1.0)
 
     
     dynamicObjVals = test[7]
@@ -2906,11 +2730,54 @@ begin
 
     #latex = "\\multirow{"*string(numSols)*"}{*}{"
 end
-StatsPlots.plot!(dynamicObjVals[p2], dynamicLFRs[p2], seriestype =:scatter, label = "c = "*string((c1,c2)))
+StatsPlots.plot!(dynamicObjVals[p2], dynamicLFRs[p2], seriestype =:scatter, label = "c = "*string((c1,c2)), xlim = (3,18))
+StatsPlots.plot(test[2][p3], test[3][p3], seriestype =:scatter, label = "DOP", markersize = 7)
 xlabel!("Operational Cost")
 ylabel!("LFR")
 #seriestype=:scatter
 probParams
+
+
+#######################################################
+#varing repair costs###################################
+#######################################################
+i = 6
+j = 5
+begin
+    r1 = 200
+    r2 = 200
+    probParams = copy(probParamses[i])
+    (; N, alpha, beta, tau, c, p, r) = probParams
+    C = copy(Cs[i])
+    w = copy(ws[i])
+    B = minimum(w)*j
+    W = B
+
+    new_r = [r1,r2,100,100]
+
+    probParams = problemParams(4, beta, alpha, tau, c, new_r, 1.0)
+    test = mdpDesignHeuristic(probParams, C, B, w, W; method = "full-lp", epsilonStep = 0.1, epsilonMin = 1.0)
+
+    
+    dynamicObjVals = test[7]
+    dynamicLFRs = test[8]
+
+    p2 = sortperm(dynamicObjVals)
+    p3 = sortperm(test[2])
+    println(test[1][p3])
+    println(test[2][p3])
+    println(test[3][p3])
+    println(p)
+    numSols = length(test[1])
+
+    #latex = "\\multirow{"*string(numSols)*"}{*}{"
+end
+StatsPlots.plot(test[2][p3], test[3][p3], seriestype =:scatter, label = "DOP", markersize = 7)
+StatsPlots.plot!(dynamicObjVals[p2], dynamicLFRs[p2], seriestype =:scatter, label = "IDDMP")
+xlabel!("Operational Cost")
+ylabel!("LFR")
+#StatsPlots.savefig("../fairleyl/Documents/GitHub/PhD-Code/r=300-100.pdf")
+test[4]
 
 #Varying rates, with fixed reliability
 p = 0.9
