@@ -2227,7 +2227,7 @@ for B in 1:10
     #f = serialize("LPvsHeuristicTimes.dat", times)
 end
 
-function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "full-lp", epsilonMin = Inf, epsilonStep = 1.0, pStep = 0.5)
+function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "full-lp", epsilonMin = Inf, epsilonStep = 1.0, pStep = 0.5, speak = false)
     COMP_THRESHOLD = 0.02
     
     #find maximum reliability
@@ -2276,7 +2276,10 @@ function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "ful
     count = 1
     maxP = 0.0
     for design in dynamicDesigns
-        println(design)
+        if speak
+            println(design)
+        end
+
         probParamsD = maskProblemParams(probParams, design)
         designMasked = []
         
@@ -2302,8 +2305,10 @@ function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "ful
         #println("Min LFR: "*string(faLogFailRate))
 
         while abs(highLogFailRate- faLogFailRate)/abs(faLogFailRate) >= COMP_THRESHOLD
-            
-            println(round(abs(highLogFailRate- faLogFailRate)/abs(faLogFailRate), digits = 2))
+            if speak
+                println(round(abs(highLogFailRate- faLogFailRate)/abs(faLogFailRate), digits = 2))
+            end
+
             probParamsD.p = probParamsD.p*pScale
             if maxP < probParamsD.p 
                 maxP = probParamsD.p 
@@ -2748,8 +2753,8 @@ probParams
 i = 6
 j = 5
 begin
-    r1 = 200
-    r2 = 200
+    r1 = 1000
+    r2 = 1000
     probParams = copy(probParamses[i])
     (; N, alpha, beta, tau, c, p, r) = probParams
     C = copy(Cs[i])
@@ -2760,7 +2765,7 @@ begin
     new_r = [r1,r2,100,100]
 
     probParams = problemParams(4, beta, alpha, tau, c, new_r, 1.0)
-    test = mdpDesignHeuristic(probParams, C, B, w, W; method = "full-lp", epsilonStep = 0.1, epsilonMin = 1.0)
+    test = mdpDesignHeuristic(probParams, C, B, w, W; method = "full-lp", epsilonStep = 0.01, speak = true)
 
     
     dynamicObjVals = test[7]
@@ -2777,10 +2782,10 @@ begin
     #latex = "\\multirow{"*string(numSols)*"}{*}{"
 end
 StatsPlots.plot(test[2][p3], test[3][p3], seriestype =:scatter, label = "DOP", markersize = 7)
-StatsPlots.plot!(dynamicObjVals[p2], dynamicLFRs[p2], seriestype =:scatter, label = "IDDMP")
+StatsPlots.plot!(dynamicObjVals[p2], dynamicLFRs[p2], seriestype =:scatter, label = "IDDMP") #, xlim = (20.99999,21.00001), ylim = (-19.7,-18.5)
 xlabel!("Operational Cost")
 ylabel!("LFR")
-#StatsPlots.savefig("../fairleyl/Documents/GitHub/PhD-Code/r=300-100.pdf")
+#StatsPlots.savefig("../fairleyl/Documents/GitHub/PhD-Code/r="*string(r1)*"-"*string(r2)*".pdf")
 test[4]
 
 #Varying rates, with fixed reliability
