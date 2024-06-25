@@ -2500,9 +2500,40 @@ for i in 1:14
     end
 end
 
+#DOP only version
+numReps = 10
+dopTimes = Dict()
+for i in 1:14
+    println("Set: "*string(i))
+    for j in 3:5
+        println("Constraint "*string(j))
+        probParams = copy(probParamses[i])
+        C = Cs[i]
+        w = ws[i]
+        B = minimum(w)*j
+        W = B
+
+        times = []
+        for k in 1:numReps
+            t = time()
+            out = boDop(probParams, C, B, w, W; epsilonStep = 1.0)
+            heuristicTime = time() - t 
+            push!(times, heuristicTime)
+            print(string(k)*", ")
+        end
+        dopTimes[i,j] = times
+    end
+end
+
+for i in 1:14
+    println("Set: "*string(i))
+    for j in 3:5
+        println(string(j)*": "*string(round(mean(dopTimes[i,j]), digits = 3)))
+    end
+end
 blah = deserialize("Exp30Apr24.big")
 keys(blah)
-
+mean(dopTimes[2,3])
 ################################################################
 #Experiment for the FAS LP formulation for the heuristicTime
 ################################################################
