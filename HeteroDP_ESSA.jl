@@ -2272,7 +2272,6 @@ function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "ful
     dynamicDesigns = eliminateDominatedDesigns(designs)
     dynamicObjVals = []
     dynamicLogFailRates = []
-
     count = 1
     maxP = 0.0
     for design in dynamicDesigns
@@ -2335,20 +2334,21 @@ function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "ful
         end
         push!(dynamicObjVals, objValsD)
         push!(dynamicLogFailRates, logFailRatesD)
-
         count = count + 1
     end    
 
-    #TO DO: Identify non-dom solutions
     allObjVals = deepcopy(objVals)
     allLFRs = deepcopy(logFailRates)
+    allDesigns = deepcopy(designs)
     for i in 1:length(dynamicObjVals)
         append!(allObjVals, dynamicObjVals[i])
         append!(allLFRs, dynamicLogFailRates[i])
+        append!(allDesigns, fill(dynamicDesigns[i], length(dynamicObjVals[i])))
     end
     
     nonDomOJs = []
     nonDomLFRs = []
+    nonDomDesigns = []
     for i in 1:length(allObjVals)
         dom = false
         for j in 1:length(allObjVals)
@@ -2360,12 +2360,56 @@ function mdpDesignHeuristic(probParams::problemParams, C, B, w, W; method = "ful
         if !dom
             push!(nonDomOJs, allObjVals[i])
             push!(nonDomLFRs, allLFRs[i])
+            push!(nonDomDesigns, allDesigns[i])
         end
     end
 
-    return designs, objVals, logFailRates, dynamicDesigns, dynamicObjVals, dynamicLogFailRates, nonDomOJs, nonDomLFRs, maxP
+    return designs, objVals, logFailRates, dynamicDesigns, dynamicObjVals, dynamicLogFailRates, nonDomOJs, nonDomLFRs, maxP, nonDomDesigns
 end 
 
+function boDop(probParams::problemParams, C, B, w, W; epsilonMin = Inf, epsilonStep = 1.0, speak = false)
+    COMP_THRESHOLD = 0.02
+    
+    #find maximum reliability
+    minFailRes = dcpIntMinFailureConstrainedCost(probParams, C, B, w = w, W = W)
+    minFailProb = minFailRes[2]
+    println(value.(minFailRes[3]))
+    #save values
+    designs = [value.(minFailRes[3])]
+    objVals = [dcpCostRate(probParams, designs[1])]
+    logFailRates = [minFailProb]
+
+    #for range of target failure-rates
+    targetLFR = epsilonStep
+    if epsilonMin < Inf
+        targetLFR = epsilonMin 
+    end
+
+    while targetLFR < abs(minFailProb)
+        #optimise for cost
+        res = dcpIntConstrainedFailure(probParams, probLim = -targetLFR, C = C, B = B, w = w, W = W)
+        thisDesign = dcpIntBinToVar(res[4])
+        
+        #if solution is new, save it
+        match = false
+        for d in designs
+            if d == thisDesign
+                match = true
+                break
+            end
+        end
+
+        if !match
+            push!(designs, thisDesign)
+            push!(objVals, res[2])
+            push!(logFailRates, res[3])
+        end
+
+        targetLFR = -res[3] + epsilonStep
+    end              
+
+    return designs, objVals, logFailRates
+end 
 
 ####################################
 #Experiment#########################
@@ -2789,27 +2833,85 @@ ylabel!("LFR")
 test[4]
 
 #Varying rates, with fixed reliability
-p = 0.9
-tau = 1.0
-alpha = tau/p - tau
-probParams = problemParams(1, 1.0, [alpha], [tau], [1.0], [100.0], 1.0)
-C = [1]
-B = 12
-w = [1]
-W = B
-test = mdpDesignHeuristic(probParams, C, B, w, W; method = "full-lp")
+i = 6
+j = 5
+begin
+    mult1 = 1.0
+    mult2 = 1.0
 
-staticObjVals = test[2]
-staticLFRs = test[3]
+    r1 = 300.0#*mult1
+    r2 = 100.0#*mult2
+    probParams = copy(probParamses[i])
+    (; N, alpha, beta, tau, c, p, r) = probParams
+    C = copy(Cs[i])
+    w = copy(ws[i])
+    B = minimum(w)*j
+    W = B
 
-dynamicObjVals = test[7]
-dynamicLFRs = test[8]
+    new_r = [r1, r2, 100.0, 100.0]
+    probParams = problemParams(4, beta, alpha .* [mult1, mult2, 1.0,1.0], tau .* [mult1, mult2, 1.0,1.0], c, new_r, 1.0)
+    test = mdpDesignHeuristic(probParams, C, B, w, W; method = "full-lp", epsilonStep = 0.01, speak = true)
 
-StatsPlots.plot(staticObjVals, staticLFRs, seriestype=:scatter, label = "DOP", markersize = 7)
-xlabel!("OpCost")
+    
+    dynamicObjVals = test[7]
+    dynamicLFRs = test[8]
+    dynamicDesigns = test[10]
+    p2 = sortperm(dynamicObjVals)
+    p3 = sortperm(test[2])
+    println(test[1][p3])
+    println(test[2][p3])
+    println(test[3][p3])
+    println(p)
+    numSols = length(test[1])
+
+    #latex = "\\multirow{"*string(numSols)*"}{*}{"
+end
+StatsPlots.plot(test[2][p3], test[3][p3], seriestype =:scatter, label = "DOP", markersize = 7, thickness_scaling = 1.3)
+StatsPlots.plot!(dynamicObjVals[p2], dynamicLFRs[p2], seriestype =:scatter, label = "IDDMP") #, xlim = (20.99999,21.00001), ylim = (-19.7,-18.5)
+xlabel!("Operational Cost")
 ylabel!("LFR")
+#StatsPlots.savefig("../fairleyl/Documents/GitHub/PhD-Code/r="*string(r1)*"-"*string(r2)*".pdf")
+test[4]
 
-StatsPlots.plot!(dynamicObjVals, dynamicLFRs, seriestype=:scatter, label = "Dynamic")
-println(test[1])
+for i in 1:length(dynamicDesigns)
+    d = dynamicDesigns[p2][i]
+    go = dynamicObjVals[p2][i]
+    gf = dynamicLFRs[p2][i]
+    println(string(d)*": "*string(go)*", "*string(gf))
+end
 
-#
+mults = [1.0,5.0,10.0]
+for mult1 in mults
+    for mult2 in mults
+        r1 = 300.0#*mult1
+        r2 = 100.0#*mult2
+        probParams = copy(probParamses[i])
+        (; N, alpha, beta, tau, c, p, r) = probParams
+        C = copy(Cs[i])
+        w = copy(ws[i])
+        B = minimum(w)*j
+        W = B
+
+        new_r = [r1, r2, 100.0, 100.0]
+        probParams = problemParams(4, beta, alpha .* [mult1, mult2, 1.0,1.0], tau .* [mult1, mult2, 1.0,1.0], c, new_r, 1.0)
+        test = mdpDesignHeuristic(probParams, C, B, w, W; method = "full-lp", epsilonStep = 0.01, speak = true)
+
+        
+        dynamicObjVals = test[7]
+        dynamicLFRs = test[8]
+        dynamicDesigns = test[10]
+        p2 = sortperm(dynamicObjVals)
+        p3 = sortperm(test[2])
+        println(test[1][p3])
+        println(test[2][p3])
+        println(test[3][p3])
+        println(p)
+        numSols = length(test[1])
+
+        StatsPlots.plot(test[2][p3], test[3][p3], seriestype =:scatter, label = "DOP", markersize = 7, thickness_scaling = 1.3)
+        StatsPlots.plot!(dynamicObjVals[p2], dynamicLFRs[p2], seriestype =:scatter, label = "IDDMP") #, xlim = (20.99999,21.00001), ylim = (-19.7,-18.5)
+        xlabel!("Operational Cost")
+        ylabel!("LFR")
+        StatsPlots.savefig("../fairleyl/Documents/GitHub/PhD-Code/mult="*string(mult1,mult2)*".pdf")
+    end
+end
