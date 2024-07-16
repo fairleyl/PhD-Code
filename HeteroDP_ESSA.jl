@@ -1,6 +1,6 @@
-println("Start")
+println("Start") #Allow Julia to "warm up"
 using Distributed
-#addprocs(1)
+
 
 
 
@@ -1898,7 +1898,7 @@ dynamicObjValDict = Dict()
 dynamicLFRDict = Dict()
 
 #for every component set
-for i in 1:14
+for i in 1 #1:14
     println("Problem Set: "*string(i))
     probParams = probParamses[i]
     println(probParams)
@@ -1906,7 +1906,7 @@ for i in 1:14
     w = ws[i]
 
     #for each constraint pair
-    for j in 1:5
+    for j in 2:5#1:5
         println("Constraint Set: "*string(j))
         B = Bs[i][j]
         W = Ws[i][j]
@@ -2030,15 +2030,16 @@ for i in 1:14
         out["dObj"] = dynamicObjValDict
         out["dLFR"] = dynamicLFRDict
 
-        f = serialize("../fairleyl/Documents/GitHub/PhD-Code/17AprExp.dat", out)
+        f = serialize("../fairleyl/Documents/GitHub/PhD-Code/1JulyExp.dat", out)
     end
 end
 
 dynamicDesignDict[[5,1]]
-pair = [3,1]
-StatsPlots.plot(staticObjValDict[pair], staticLFRDict[pair], seriestype=:scatter, label = "Designs", markersize = 7)
+pair = [1,5]
+StatsPlots.plot([0],[0], markersize = 0, primary = false, thickness_scaling = 1.3)
+StatsPlots.plot!(staticObjValDict[pair], staticLFRDict[pair], seriestype=:scatter, label = "DOP", markersize = 7)
 xlabel!("Operational Cost")
-ylabel!("log-failure-rate")
+ylabel!("LFR")
 StatsPlots.savefig("../fairleyl/Documents/GitHub/PhD-Code/nicePlot_" * string(pair) * "0.pdf")
 
 for i in 1:length(dynamicObjValDict[pair])
@@ -2070,7 +2071,6 @@ for i in 1:length(allObjVals)
         push!(nonDomLFRs, allLFRs[i])
     end
 end
-
 p = sortperm(nonDomOJs)
 StatsPlots.plot!(nonDomOJs[p], nonDomLFRs[p], colour = :red, label = "Pareto-front")
 StatsPlots.savefig("../fairleyl/Documents/GitHub/PhD-Code/nicePlot" * string(pair) * "_front.pdf")
