@@ -1,497 +1,492 @@
 println("Start") #Allow Julia to "warm up"
-using Distributed
+
+using Distributions
+using Random
+using Plots
+using PyPlot
+using StatsBase
+using StatsPlots
+using Serialization
+using LinearAlgebra
+using LinearSolve
+using IJulia
+using JuMP, Gurobi
+using SharedArrays
+
+import Base.copy
+
+ENV["GUROBI_HOME"] = "~/gurobi1001/linux64"
+ENV["GRB_LICENSE_FILE"]="/home/fairleyl/gurobi1001/gurobi.lic"
+
+const GRB_ENV = Gurobi.Env()
 
 
+#set cartesian product, treating two input arrays as and bs as sets, and returning an array of tuples
+function cartProd(as, bs)
+    out = []
+    for a in as
+        for b in bs
+            push!(out, [a,b])
+        end
+    end
 
+    return out
+end
 
-begin
-    using Distributions
-    using Random
-    using Plots
-    using PyPlot
-    using StatsBase
-    using StatsPlots
-    using Serialization
-    using LinearAlgebra
-    using LinearSolve
-    using IJulia
-    using JuMP, Gurobi
-    using SharedArrays
+#repeated cartesian product for sets of the form {1,2,...,M}. A is an array of arrays to be treated as sets. 
+#Each A[i] has an associated cost C[i], and there can be a budget B. For example, if A=[[0,1,2],[0,1,2,3]], the tuple
+# [2,3] will only be ioncluded in the final set if C[1]*2 + C[2]*3 <= B 
+function repCartesianProduct(A; C = 0, B = Inf)
+    N = length(A)
+    if N == 1
+        return [[a] for a in A[1]]
+    end
 
-    import Base.copy
-
-    ENV["GUROBI_HOME"] = "~/gurobi1001/linux64"
-    ENV["GRB_LICENSE_FILE"]="/home/fairleyl/gurobi1001/gurobi.lic"
-
-    const GRB_ENV = Gurobi.Env()
-
-    ########################################################
-    #DYNAMIC STUFF##########################################
-    ########################################################
-
-    #cartesian product and repeated cartesian product
-    function cartProd(as, bs)
-        out = []
-        for a in as
-            for b in bs
-                push!(out, [a,b])
+    subProds = [cartProd(A[1],A[2])]
+    for i in 1:(N - 2)
+        newSubProds = cartProd(subProds[i], A[i+2])
+        newSubProdsChecked = []
+        for prod in newSubProds
+            newProd = copy(prod[1])
+            push!(newProd, prod[2])
+            if B == Inf || sum(C[1:(i + 2)] .* newProd) <= B
+                push!(newSubProdsChecked, newProd)
             end
         end
 
-        return out
+        push!(subProds, newSubProdsChecked)
     end
 
-    function repCartesianProduct(A; C = 0, B = Inf)
-        N = length(A)
-        if N == 1
-            return [[a] for a in A[1]]
+    return subProds[N-1]
+end
+
+#functions to construct state space
+function enumerateStatesHomog(N)
+    stateSpace = [[0,0]]
+    for i in 1:N
+        append!(stateSpace, [[j, i - j] for j in 0:i])
+    end
+    return stateSpace
+end
+
+function enumerateStatesESSA(A)
+    B = [enumerateStatesHomog(A[i]) for i in 1:length(A)]
+
+    return repCartesianProduct(B)
+end
+
+#functions to construct union over all action spaces to different levels of complexity
+function enumerateAllActionsHomog(N)
+    return [i for i in 0:N]
+end
+
+function enumerateAllActionsESSA(A)
+    B = [enumerateAllActionsHomog(A[i]) for i in 1:length(A)]
+    return repCartesianProduct(B)
+end
+
+function enumerateAllActionsESSA_LAS1(D)
+    N = length(D)
+    output = [fill(0, N)]
+    for i in 1:N
+        newA = fill(0, N)
+        newA[i] = 1
+        push!(output, newA)
+    end
+
+    return output
+end
+
+function enumerateAllActionsESSA_LAS2(D)
+    N = length(D)
+    output = [fill(0, N)]
+    for i in 1:N
+        newA = fill(0, N)
+        newA[i] = 1
+        for j in 1:D[i]
+            push!(output, j .* newA)
         end
-
-        subProds = [cartProd(A[1],A[2])]
-        for i in 1:(N - 2)
-            newSubProds = cartProd(subProds[i], A[i+2])
-            newSubProdsChecked = []
-            for prod in newSubProds
-                newProd = copy(prod[1])
-                push!(newProd, prod[2])
-                if B == Inf || sum(C[1:(i + 2)] .* newProd) <= B
-                    push!(newSubProdsChecked, newProd)
-                end
-            end
-
-            push!(subProds, newSubProdsChecked)
-        end
-
-        return subProds[N-1]
     end
 
-    #functions to construct state space
-    function enumerateStatesHomog(N)
-        stateSpace = [[0,0]]
-        for i in 1:N
-            append!(stateSpace, [[j, i - j] for j in 0:i])
-        end
-        return stateSpace
-    end
+    return output
+end
 
-    function enumerateStatesESSA(A)
-        B = [enumerateStatesHomog(A[i]) for i in 1:length(A)]
 
-        return repCartesianProduct(B)
-    end
+#functions to construct only feasible action spaces to different levels of complexity
+function enumerateFeasibleActionsHomog(s, i)
+    return [i for i in 0:s[i][2]]
+end
 
-    #functions to construct union over all action spaces to different levels of complexity
-    function enumerateAllActionsHomog(N)
-        return [i for i in 0:N]
-    end
+function enumerateFeasibleActionsESSA(s)
+    B = [enumerateFeasibleActionsHomog(s,i) for i in 1:length(s)]
+    return repCartesianProduct(B)
+end
 
-    function enumerateAllActionsESSA(A)
-        B = [enumerateAllActionsHomog(A[i]) for i in 1:length(A)]
-        return repCartesianProduct(B)
-    end
-
-    function enumerateAllActionsESSA_LAS1(D)
-        N = length(D)
-        output = [fill(0, N)]
-        for i in 1:N
+function enumerateFeasibleActionsESSA_LAS1(s)
+    N = length(s)
+    output = [fill(0, N)]
+    for i in 1:N
+        if s[i][2] > 0
             newA = fill(0, N)
             newA[i] = 1
             push!(output, newA)
         end
-
-        return output
     end
 
-    function enumerateAllActionsESSA_LAS2(D)
-        N = length(D)
-        output = [fill(0, N)]
-        for i in 1:N
+    return output
+end
+
+function enumerateFeasibleActionsESSA_LAS2(s)
+    N = length(s)
+    output = [fill(0, N)]
+    for i in 1:N
+        if s[i][2] > 0
             newA = fill(0, N)
             newA[i] = 1
-            for j in 1:D[i]
+            for j in 1:s[i][2]
                 push!(output, j .* newA)
             end
         end
-
-        return output
     end
 
+    return output
+end
 
-    #functions to construct only feasible action spaces to different levels of complexity
-    function enumerateFeasibleActionsHomog(s, i)
-        return [i for i in 0:s[i][2]]
-    end
 
-    function enumerateFeasibleActionsESSA(s)
-        B = [enumerateFeasibleActionsHomog(s,i) for i in 1:length(s)]
-        return repCartesianProduct(B)
-    end
+mutable struct problemParams
+    #Misc
+    N::Int64 #Number of links
+    beta::Float64 #demand
 
-    function enumerateFeasibleActionsESSA_LAS1(s)
-        N = length(s)
-        output = [fill(0, N)]
-        for i in 1:N
-            if s[i][2] > 0
-                newA = fill(0, N)
-                newA[i] = 1
-                push!(output, newA)
-            end
+    #rates
+    alpha::Array{Float64} #array of deg rates
+    tau::Array{Float64} #array of repair rates
+    
+    #Costs
+    c::Array{Float64} #array of usage costs
+    r::Array{Float64} #array of repair costs
+    p::Float64 #penalty cost
+end
+
+function problemParams()
+    return problemParams(0, 0.0, [], [], [], [], 0.0)
+end
+
+function problemParams(; N = 0, beta = 1.0, alpha = [], tau = [], c = [], r = [], p = 0.0)
+    return problemParams(N, beta, alpha, tau, c, r, p)
+end
+
+function copy(probParams::problemParams)
+    (; N, beta, alpha, tau, c, r, p) = probParams
+    return problemParams(deepcopy(N), deepcopy(beta), deepcopy(alpha), deepcopy(tau), deepcopy(c), deepcopy(r), deepcopy(p))
+end
+
+function costRateESSA(s, probParams, D)
+    (; N, alpha, beta, tau, c, p, r) = probParams
+
+    costRate = [sum(s[i][1]*r[i] for i in 1:N), 0.0]
+
+    healthy = false
+    for i in 1:N
+        if D[i] - sum(s[i]) > 0
+            costRate = costRate .+ [beta*c[i], 0.0]
+            healthy = true
+            break
         end
-
-        return output
     end
 
-    function enumerateFeasibleActionsESSA_LAS2(s)
-        N = length(s)
-        output = [fill(0, N)]
-        for i in 1:N
-            if s[i][2] > 0
-                newA = fill(0, N)
-                newA[i] = 1
-                for j in 1:s[i][2]
-                    push!(output, j .* newA)
-                end
-            end
-        end
-
-        return output
+    if !healthy
+        costRate = costRate .+ [0.0, p]
     end
 
+    return costRate
+end
 
-    mutable struct problemParams
-        #Misc
-        N::Int64 #Number of links
-        beta::Float64 #demand
-
-        #rates
-        alpha::Array{Float64} #array of deg rates
-        tau::Array{Float64} #array of repair rates
-        
-        #Costs
-        c::Array{Float64} #array of usage costs
-        r::Array{Float64} #array of repair costs
-        p::Float64 #penalty cost
+function costRateESSA(s, a, probParams, D)
+    (; N) = probParams
+    sPrime = copy(s)
+    for i in 1:N
+        sPrime[i] = sPrime[i] .+ a[i]*[1,-1]
     end
 
-    function problemParams()
-        return problemParams(0, 0.0, [], [], [], [], 0.0)
+    return costRateESSA(sPrime, probParams, D)
+end
+
+function expectedNextValueESSA(s,a,probParams, D, del, h)
+    (; N, alpha, beta, tau, c, p, r) = probParams
+    sPrime = copy(s)
+    for i in 1:N
+        sPrime[i] = sPrime[i] .+ (a[i] .* [1,-1])
     end
 
-    function problemParams(; N = 0, beta = 1.0, alpha = [], tau = [], c = [], r = [], p = 0.0)
-        return problemParams(N, beta, alpha, tau, c, r, p)
+    runningTotal = [0.0,0.0]
+    runningTotalProb = 0.0
+
+    #new degradations
+    for i in 1:N
+        healthyI = D[i] - sum(sPrime[i])
+        if healthyI > 0
+            sNext = copy(sPrime)
+            sNext[i] += [0,1]
+            runningTotal .+= (alpha[i]*healthyI*del) .* h[sNext]
+            runningTotalProb += alpha[i]*healthyI*del
+        end
     end
 
-    function copy(probParams::problemParams)
-        (; N, beta, alpha, tau, c, r, p) = probParams
-        return problemParams(deepcopy(N), deepcopy(beta), deepcopy(alpha), deepcopy(tau), deepcopy(c), deepcopy(r), deepcopy(p))
+    #repair failures
+    for i in 1:N
+        if sPrime[i][1] > 0
+            sNext = copy(sPrime)
+            sNext[i] += [-1,1]
+            runningTotal .+= (sPrime[i][1]*alpha[i]*del) .* h[sNext]
+            runningTotalProb += sPrime[i][1]*alpha[i]*del
+        end
     end
 
-    function costRateESSA(s, probParams, D)
-        (; N, alpha, beta, tau, c, p, r) = probParams
-
-        costRate = [sum(s[i][1]*r[i] for i in 1:N), 0.0]
-
-        healthy = false
-        for i in 1:N
-            if D[i] - sum(s[i]) > 0
-                costRate = costRate .+ [beta*c[i], 0.0]
-                healthy = true
-                break
-            end
+    #repair success
+    for i in 1:N
+        if sPrime[i][1] > 0
+            sNext = copy(sPrime)
+            sNext[i] += [-1,0]
+            runningTotal .+= (sPrime[i][1]*tau[i]*del) .* h[sNext]
+            runningTotalProb += sPrime[i][1]*tau[i]*del
         end
-
-        if !healthy
-            costRate = costRate .+ [0.0, p]
-        end
-
-        return costRate
     end
 
-    function costRateESSA(s, a, probParams, D)
-        (; N) = probParams
-        sPrime = copy(s)
-        for i in 1:N
-            sPrime[i] = sPrime[i] .+ a[i]*[1,-1]
-        end
+    return runningTotal .+ ((1 - runningTotalProb) .* h[sPrime])
+end
 
-        return costRateESSA(sPrime, probParams, D)
-    end
-
-    function expectedNextValueESSA(s,a,probParams, D, del, h)
-        (; N, alpha, beta, tau, c, p, r) = probParams
-        sPrime = copy(s)
-        for i in 1:N
-            sPrime[i] = sPrime[i] .+ (a[i] .* [1,-1])
-        end
-
-        runningTotal = [0.0,0.0]
-        runningTotalProb = 0.0
-
-        #new degradations
-        for i in 1:N
-            healthyI = D[i] - sum(sPrime[i])
-            if healthyI > 0
-                sNext = copy(sPrime)
-                sNext[i] += [0,1]
-                runningTotal .+= (alpha[i]*healthyI*del) .* h[sNext]
-                runningTotalProb += alpha[i]*healthyI*del
-            end
-        end
-
-        #repair failures
-        for i in 1:N
-            if sPrime[i][1] > 0
-                sNext = copy(sPrime)
-                sNext[i] += [-1,1]
-                runningTotal .+= (sPrime[i][1]*alpha[i]*del) .* h[sNext]
-                runningTotalProb += sPrime[i][1]*alpha[i]*del
-            end
-        end
-
-        #repair success
-        for i in 1:N
-            if sPrime[i][1] > 0
-                sNext = copy(sPrime)
-                sNext[i] += [-1,0]
-                runningTotal .+= (sPrime[i][1]*tau[i]*del) .* h[sNext]
-                runningTotalProb += sPrime[i][1]*tau[i]*del
-            end
-        end
-
-        return runningTotal .+ ((1 - runningTotalProb) .* h[sPrime])
-    end
-
-    #PI Action Construction
-    function piActionESSA(s, actionSpace, h, probParams, del, D)
-        (; N, alpha, beta, tau, c, p, r) = probParams
-        if sum(s[i][2] for i in 1:N) == 0
-            optA = fill(0, N)
-            optH = (costRateESSA(s, probParams, D) .* del) .+ expectedNextValueESSA(s, optA, probParams, D, del, h)
-            return optA, optH
-        end
-
+#PI Action Construction
+function piActionESSA(s, actionSpace, h, probParams, del, D)
+    (; N, alpha, beta, tau, c, p, r) = probParams
+    if sum(s[i][2] for i in 1:N) == 0
         optA = fill(0, N)
         optH = (costRateESSA(s, probParams, D) .* del) .+ expectedNextValueESSA(s, optA, probParams, D, del, h)
-
-        for testA in actionSpace
-            testH = (costRateESSA(s, testA, probParams, D) .* del) .+ expectedNextValueESSA(s, testA, probParams, D, del, h)
-            if sum(testH) < sum(optH)
-                optH = testH
-                optA = testA
-            end
-        end
-
         return optA, optH
     end
 
-    function piPolicyESSA(h, actionSpaces, probParams, del, D)
-        policy = Dict()
-        stateSpace = enumerateStatesESSA(D)
-        for s in stateSpace
-            policy[s] = piActionESSA(s, actionSpaces[s], h, probParams, del, D)[1]
+    optA = fill(0, N)
+    optH = (costRateESSA(s, probParams, D) .* del) .+ expectedNextValueESSA(s, optA, probParams, D, del, h)
+
+    for testA in actionSpace
+        testH = (costRateESSA(s, testA, probParams, D) .* del) .+ expectedNextValueESSA(s, testA, probParams, D, del, h)
+        if sum(testH) < sum(optH)
+            optH = testH
+            optA = testA
         end
-        policy = policySequencer(policy)
-        return policy
     end
+
+    return optA, optH
+end
+
+function piPolicyESSA(h, actionSpaces, probParams, del, D)
+    policy = Dict()
+    stateSpace = enumerateStatesESSA(D)
+    for s in stateSpace
+        policy[s] = piActionESSA(s, actionSpaces[s], h, probParams, del, D)[1]
+    end
+    policy = policySequencer(policy)
+    return policy
+end
+    
+function rpeESSA(probParams, D, policy, epsilon; nMax = 0, delScale = 1.0, printProgress = false, modCounter = 1000)
+    (; N, alpha, beta, tau, c, p, r) = probParams
+    del = 1/(delScale*(sum(D[i]*(alpha[i] + tau[i]) for i in 1:N)))
+    h = Dict()
+    w = Dict()
+
+    stateSpace = enumerateStatesESSA(D)
+    for s in stateSpace
+        h[s] = [0.0, 0.0]
+        w[s] = [0.0, 0.0]
+    end
+    s0  = fill([0,0], N)
+    n = 0
+    deltas = Dict()
+    delta = 0.0
+
+    while true
+        n += 1
+        for s in stateSpace
+            a = policy[s]
+            w[s] = (costRateESSA(s, a, probParams, D) .* del) .+ expectedNextValueESSA(s, a, probParams, D, del, h)
+        end
+
+        #calculate relative values and delta
+        for s in stateSpace
+            update = w[s] .- w[s0]
+            deltas[s] = update .- h[s]
+            h[s] = update
+        end
+
+        deltas1 = [v[1] for v in values(deltas)]
+        deltas2 = [v[2] for v in values(deltas)]
+        delta1 = maximum(deltas1) - minimum(deltas1)
+        delta2 = maximum(deltas2) - minimum(deltas2)
+        #stopping condition
+        if max(delta1,delta2) < epsilon || n == nMax
+            break
+        end
+
+        if printProgress && n%modCounter == 0
+            println(n)
+        end
+    end
+    a0 = fill(0, N)
+    g = (costRateESSA(s0, a0, probParams, D) .* del) .+ expectedNextValueESSA(s0, a0, probParams, D, del, h) - h[s0]
+
+    return g/del, h, n, delta
+end
+
+function rpiESSA(probParams, D, hIn, epsilon; nMax = 0, delScale = 1, printProgress = false, modCounter = 1000, actionType = "las1")
+    (; N, alpha, beta, tau, c, p, r) = probParams
+    del = 1/(delScale*(sum(D[i]*(alpha[i] + tau[i]) for i in 1:N)))
+    stateSpace = enumerateStatesESSA(D)
+    actionSpaces = Dict()
+    if actionType == "las1"
+        for s in stateSpace
+            actionSpaces[s] = enumerateFeasibleActionsESSA_LAS1(s)
+        end
+    elseif actionType == "las2"
+        for s in stateSpace
+            actionSpaces[s] = enumerateFeasibleActionsESSA_LAS2(s)
+        end
+    elseif actionType == "full"
+        for s in stateSpace
+            actionSpaces[s] = enumerateFeasibleActionsESSA(s)
+        end
+    else
+        throw(DomainError(actionType, "Invalid actionType"))
+    end
+
+    policy = piPolicyESSA(hIn, actionSpaces, probParams, del, D)
+    output = rpeESSA(probParams, D, policy, epsilon; nMax = nMax, delScale = delScale, printProgress = printProgress, modCounter = modCounter)
+    return output[1], output[2], output[3], policy 
+end
+
+function rviESSA(probParams, D, epsilon; nMax = 0, delScale = 1, printProgress = true, modCounter = 1000, actionType = "las1")
+    (; N, alpha, beta, tau, c, p, r) = probParams
+    del = 1/(delScale*(sum(D[i]*(alpha[i] + tau[i]) for i in 1:N)))
+    stateSpace = enumerateStatesESSA(D)
+    actionSpaces = Dict()
+    if actionType == "las1"
+        for s in stateSpace
+            actionSpaces[s] = enumerateFeasibleActionsESSA_LAS1(s)
+        end
+    elseif actionType == "las2"
+        for s in stateSpace
+            actionSpaces[s] = enumerateFeasibleActionsESSA_LAS2(s)
+        end
+    elseif actionType == "full"
+        for s in stateSpace
+            actionSpaces[s] = enumerateFeasibleActionsESSA(s)
+        end
+    else
+        throw(DomainError(actionType, "Invalid actionType"))
+    end
+    #println(actionSpaces)
+    h = Dict()
+    w = Dict()
+    policy = Dict()
+    
+    for s in stateSpace
+        h[s] = [0.0, 0.0]
+        w[s] = [0.0, 0.0]
+        policy[s] = fill(0, N)
+    end
+    s0  = fill([0,0], N)
+    n = 0
+    
+    deltas = Dict()
+    delta1 = 0.0
+    delta2 = 0.0
+    delta = 0.0
+    #do until max iterations met or epsilon convergence
+    while true
+        n = n + 1
+        #find updates for every state
+        for s in stateSpace
+            as = actionSpaces[s]
+            policy[s],w[s] = piActionESSA(s, as, h, probParams, del, D)
+        end
         
-    function rpeESSA(probParams, D, policy, epsilon; nMax = 0, delScale = 1.0, printProgress = false, modCounter = 1000)
-        (; N, alpha, beta, tau, c, p, r) = probParams
-        del = 1/(delScale*(sum(D[i]*(alpha[i] + tau[i]) for i in 1:N)))
-        h = Dict()
-        w = Dict()
-
-        stateSpace = enumerateStatesESSA(D)
+        #calculate relative values and delta
         for s in stateSpace
-            h[s] = [0.0, 0.0]
-            w[s] = [0.0, 0.0]
+            update = w[s] .- w[s0]
+            deltas[s] = update .- h[s]
+            h[s] = update
         end
-        s0  = fill([0,0], N)
-        n = 0
-        deltas = Dict()
-        delta = 0.0
-
-        while true
-            n += 1
-            for s in stateSpace
-                a = policy[s]
-                w[s] = (costRateESSA(s, a, probParams, D) .* del) .+ expectedNextValueESSA(s, a, probParams, D, del, h)
-            end
-
-            #calculate relative values and delta
-            for s in stateSpace
-                update = w[s] .- w[s0]
-                deltas[s] = update .- h[s]
-                h[s] = update
-            end
-
-            deltas1 = [v[1] for v in values(deltas)]
-            deltas2 = [v[2] for v in values(deltas)]
-            delta1 = maximum(deltas1) - minimum(deltas1)
-            delta2 = maximum(deltas2) - minimum(deltas2)
-            #stopping condition
-            if max(delta1,delta2) < epsilon || n == nMax
-                break
-            end
-
-            if printProgress && n%modCounter == 0
-                println(n)
-            end
-        end
-        a0 = fill(0, N)
-        g = (costRateESSA(s0, a0, probParams, D) .* del) .+ expectedNextValueESSA(s0, a0, probParams, D, del, h) - h[s0]
-
-        return g/del, h, n, delta
-    end
-
-    function rpiESSA(probParams, D, hIn, epsilon; nMax = 0, delScale = 1, printProgress = false, modCounter = 1000, actionType = "las1")
-        (; N, alpha, beta, tau, c, p, r) = probParams
-        del = 1/(delScale*(sum(D[i]*(alpha[i] + tau[i]) for i in 1:N)))
-        stateSpace = enumerateStatesESSA(D)
-        actionSpaces = Dict()
-        if actionType == "las1"
-            for s in stateSpace
-                actionSpaces[s] = enumerateFeasibleActionsESSA_LAS1(s)
-            end
-        elseif actionType == "las2"
-            for s in stateSpace
-                actionSpaces[s] = enumerateFeasibleActionsESSA_LAS2(s)
-            end
-        elseif actionType == "full"
-            for s in stateSpace
-                actionSpaces[s] = enumerateFeasibleActionsESSA(s)
-            end
-        else
-            throw(DomainError(actionType, "Invalid actionType"))
-        end
-
-        policy = piPolicyESSA(hIn, actionSpaces, probParams, del, D)
-        output = rpeESSA(probParams, D, policy, epsilon; nMax = nMax, delScale = delScale, printProgress = printProgress, modCounter = modCounter)
-        return output[1], output[2], output[3], policy 
-    end
-
-    function rviESSA(probParams, D, epsilon; nMax = 0, delScale = 1, printProgress = true, modCounter = 1000, actionType = "las1")
-        (; N, alpha, beta, tau, c, p, r) = probParams
-        del = 1/(delScale*(sum(D[i]*(alpha[i] + tau[i]) for i in 1:N)))
-        stateSpace = enumerateStatesESSA(D)
-        actionSpaces = Dict()
-        if actionType == "las1"
-            for s in stateSpace
-                actionSpaces[s] = enumerateFeasibleActionsESSA_LAS1(s)
-            end
-        elseif actionType == "las2"
-            for s in stateSpace
-                actionSpaces[s] = enumerateFeasibleActionsESSA_LAS2(s)
-            end
-        elseif actionType == "full"
-            for s in stateSpace
-                actionSpaces[s] = enumerateFeasibleActionsESSA(s)
-            end
-        else
-            throw(DomainError(actionType, "Invalid actionType"))
-        end
-        #println(actionSpaces)
-        h = Dict()
-        w = Dict()
-        policy = Dict()
         
-        for s in stateSpace
-            h[s] = [0.0, 0.0]
-            w[s] = [0.0, 0.0]
-            policy[s] = fill(0, N)
+        #println(h[[[1,0],[2,0],[1,0]]])
+        deltas1 = [v[1] for v in values(deltas)]
+        deltas2 = [v[2] for v in values(deltas)]
+        delta1 = maximum(deltas1) - minimum(deltas1)
+        delta2 = maximum(deltas2) - minimum(deltas2)
+        delta = max(delta1,delta2)
+        #stopping condition
+        if delta < epsilon || n == nMax
+            break
         end
-        s0  = fill([0,0], N)
-        n = 0
-        
-        deltas = Dict()
-        delta1 = 0.0
-        delta2 = 0.0
-        delta = 0.0
-        #do until max iterations met or epsilon convergence
-        while true
-            n = n + 1
-            #find updates for every state
-            for s in stateSpace
-                as = actionSpaces[s]
-                policy[s],w[s] = piActionESSA(s, as, h, probParams, del, D)
-            end
-            
-            #calculate relative values and delta
-            for s in stateSpace
-                update = w[s] .- w[s0]
-                deltas[s] = update .- h[s]
-                h[s] = update
-            end
-            
-            #println(h[[[1,0],[2,0],[1,0]]])
-            deltas1 = [v[1] for v in values(deltas)]
-            deltas2 = [v[2] for v in values(deltas)]
-            delta1 = maximum(deltas1) - minimum(deltas1)
-            delta2 = maximum(deltas2) - minimum(deltas2)
-            delta = max(delta1,delta2)
-            #stopping condition
-            if delta < epsilon || n == nMax
-                break
-            end
 
-            if printProgress && n%modCounter == 0
-                println(n)
-            end
+        if printProgress && n%modCounter == 0
+            println(n)
         end
-        a0 = fill(0, N)
-        g = (costRateESSA(s0, a0, probParams, D) .* del) .+ expectedNextValueESSA(s0, a0, probParams, D, del, h) .- h[s0]
-
-        return g ./ del, h, n, delta
     end
+    a0 = fill(0, N)
+    g = (costRateESSA(s0, a0, probParams, D) .* del) .+ expectedNextValueESSA(s0, a0, probParams, D, del, h) .- h[s0]
 
-    function fullyActiveESSA(D)
-        N = length(D)
-        stateSpace = enumerateStatesESSA(D)
-        policy = Dict()
-        for s in stateSpace
-            a = fill(0, N)
-            for i in 1:N
-                a[i] = s[i][2]
-            end
-            policy[s] = a
-        end
-        return policy
-    end 
+    return g ./ del, h, n, delta
+end
 
-    function postActionState(s, a)
-        N = length(a)
-        sPrime = copy(s)
+function fullyActiveESSA(D)
+    N = length(D)
+    stateSpace = enumerateStatesESSA(D)
+    policy = Dict()
+    for s in stateSpace
+        a = fill(0, N)
         for i in 1:N
-            sPrime[i] = sPrime[i] .+ (a[i] .* [1, -1])
+            a[i] = s[i][2]
         end
-        return sPrime
+        policy[s] = a
     end
-
-    function actionSequencer(s, policy)
-        N = length(s)
-        aOut = fill(0, N)
-        sPrime = copy(s)
-        a = policy[sPrime]
-        while a != fill(0, N)
-            aOut = aOut .+ a
-            sPrime = postActionState(sPrime, a)
-            a = policy[sPrime]
-        end
-    
-        return aOut
-    end
-
-    function policySequencer(policy)
-        newPolicy = Dict()
-        stateSpace = keys(policy)
-        for s in stateSpace
-            newPolicy[s] = actionSequencer(s, policy)
-        end
-    
-        return newPolicy
-    end
-
-    
+    return policy
 end 
+
+function postActionState(s, a)
+    N = length(a)
+    sPrime = copy(s)
+    for i in 1:N
+        sPrime[i] = sPrime[i] .+ (a[i] .* [1, -1])
+    end
+    return sPrime
+end
+
+function actionSequencer(s, policy)
+    N = length(s)
+    aOut = fill(0, N)
+    sPrime = copy(s)
+    a = policy[sPrime]
+    while a != fill(0, N)
+        aOut = aOut .+ a
+        sPrime = postActionState(sPrime, a)
+        a = policy[sPrime]
+    end
+
+    return aOut
+end
+
+function policySequencer(policy)
+    newPolicy = Dict()
+    stateSpace = keys(policy)
+    for s in stateSpace
+        newPolicy[s] = actionSequencer(s, policy)
+    end
+
+    return newPolicy
+end
+
+    
+
 
 ################################################
 #STATIC STUFF###################################
@@ -552,6 +547,9 @@ function dcpIntLinearisationUnconstrained(probParams::problemParams; numLinks = 
     end
 end
 
+#ε-δ-DOP-PC 
+#Input: Problem parameters, probLim is ε, M just scales variables (not needed), C and w are costs and weights, B and W are respective budgets, epsilon is actually δ
+#Output: the model, operational cost (corrected to ignore 1+δ term), LFR, and optimal x y z values  
 function dcpIntConstrainedFailure(probParams::problemParams; probLim = 0.0, M = 1.0, C = 0.0, B = Inf, w = 0.0, W = Inf, epsilon = 1.0e-1, timeLimit = 600.0)
     (;N, alpha, tau, c, p, r) = probParams
     ps = tau ./ (tau + alpha)
@@ -2534,6 +2532,7 @@ end
 blah = deserialize("Exp30Apr24.big")
 keys(blah)
 mean(dopTimes[2,3])
+
 ################################################################
 #Experiment for the FAS LP formulation for the heuristicTime
 ################################################################
